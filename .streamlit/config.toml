@@ -1,0 +1,21 @@
+[server]
+port = 47221
+address = "0.0.0.0"
+headless = true
+enableCORS = false
+enableXsrfProtection = true
+
+[browser]
+gatherUsageStats = false
+
+[client]
+toolbarMode = "minimal"
+showErrorDetails = "none"
+
+[theme]
+base = "light"
+primaryColor = "#0E6B56"
+backgroundColor = "#F6F4EF"
+secondaryBackgroundColor = "#E7EFEA"
+textColor = "#1C2421"
+font = "sans serif"

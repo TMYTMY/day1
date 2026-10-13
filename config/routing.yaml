@@ -1,0 +1,53 @@
+# Topic synonyms route a question to warehouse tables.
+# Edit this file and ask again. The app reads it on each question.
+# Matching is case-insensitive for English phrases and substring-based
+# for synonyms that contain non-ASCII characters.
+
+topics:
+  - id: revenue
+    title: Revenue
+    tables: [revenue]
+    synonyms:
+      - revenue
+      - revenues
+      - sales
+      - gmv
+      - income
+      - bookings
+      - turnover
+      - orders
+      - 收入
+      - 營收
+      - 營業額
+      - 营业额
+  - id: dau
+    title: Daily active users
+    tables: [dau]
+    synonyms:
+      - dau
+      - daily active
+      - daily active users
+      - active users
+      - new users
+      - new user
+      - 日活
+      - 日活躍
+      - 活躍用戶
+      - 活跃用户
+      - 新用戶
+      - 新用户
+
+tables:
+  revenue:
+    description: >
+      Recognized revenue in USD. One row per event_date, product, region,
+      and channel. Products are Atlas, Northstar, and Harbor. Regions are
+      AMER, EMEA, and APAC. Channels are direct, partner, and self-serve.
+      Northstar launched on 2026-09-08.
+  dau:
+    description: >
+      Daily active user slices. One row per event_date, platform, and country.
+      Platforms are ios, android, and web. Countries US, GB, DE, HK, and SG
+      partition each platform's users, so summing dau across countries is the
+      platform total. Summing across platforms counts a person on two devices
+      twice. Northstar's launch on 2026-09-08 lifted activity.

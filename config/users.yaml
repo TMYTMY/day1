@@ -1,0 +1,22 @@
+# Demo password stand-in for SSO. Replace authenticate() in src/auth.py
+# before pointing this app at real data. Passwords here are local sample
+# credentials, not production secrets.
+
+roles:
+  analyst:
+    tables: [revenue, dau]
+  finance:
+    tables: [revenue]
+  growth:
+    tables: [dau]
+
+users:
+  - username: analyst
+    password: analyst
+    role: analyst
+  - username: finance
+    password: finance
+    role: finance
+  - username: growth
+    password: growth
+    role: growth

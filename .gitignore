@@ -1,0 +1,12 @@
+.env
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.streamlit/secrets.toml
+data/*.db
+data/*.db-wal
+data/*.db-shm
+*.egg-info/
+.DS_Store

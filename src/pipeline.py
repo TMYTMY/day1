@@ -1,0 +1,284 @@
+"""Question → route → permission → SQL → guard → read-only execute → answer."""
+
+from __future__ import annotations
+
+import sqlite3
+from dataclasses import replace
+
+from src.audit import AuditEvent, AuditLog
+from src.config import Settings, redact
+from src.db.sqlite import QueryExecutionError
+from src.llm import LlmClient, LlmError, parse_model_output
+from src.local_sql import PlannerError, plan_sql
+from src.models import Answer, TableSchema, User
+from src.present import local_summary
+from src.prompt import build_messages, build_summary_messages
+from src.routing import Catalog, route_question
+from src.sql_guard import UnsafeSQLError, check_sql
+
+_SUMMARY_ROW_THRESHOLD = 8
+_MAX_QUESTION_CHARS = 2000
+
+
+def _join(titles: list[str]) -> str:
+    if not titles:
+        return "the tables on your role"
+    if len(titles) == 1:
+        return titles[0]
+    if len(titles) == 2:
+        return f"{titles[0]} and {titles[1]}"
+    return ", ".join(titles[:-1]) + f", and {titles[-1]}"
+
+
+def _allowed_topics(catalog: Catalog, allowed: set[str]) -> list[str]:
+    titles = []
+    for topic in catalog.topics:
+        if any(table in allowed for table in topic.tables):
+            titles.append(topic.title)
+    return titles
+
+
+def _examples(allowed: set[str]) -> str:
+    examples = []
+    if "revenue" in allowed:
+        examples.append("revenue by product")
+    if "dau" in allowed:
+        examples.append("DAU by platform")
+    return ", or ".join(examples)
+
+
+def _clarify(catalog: Catalog, allowed: set[str]) -> str:
+    titles = _allowed_topics(catalog, allowed)
+    if not titles:
+        return "Your role does not include any warehouse tables."
+    examples = _examples(allowed)
+    extra = f" For example: {examples}." if examples else ""
+    return f"I can answer questions about {_join(titles)}.{extra}"
+
+
+def _schemas(adapter: object, tables: list[str], catalog: Catalog) -> list[TableSchema] | str:
+    schemas: list[TableSchema] = []
+    for table in tables:
+        try:
+            schema = adapter.get_schema(table)  # type: ignore[attr-defined]
+        except NotImplementedError as exc:
+            return str(exc)
+        if schema is None:
+            return f"The routing map points at `{table}`, but that table is not in the database."
+        description = catalog.descriptions.get(table, "")
+        schemas.append(replace(schema, description=description))
+    return schemas
+
+
+def _record(
+    audit: AuditLog,
+    user: User,
+    question: str,
+    tables: list[str],
+    sql: str | None,
+    status: str,
+    row_count: int | None,
+    error: str | None,
+    settings: Settings,
+) -> bool:
+    try:
+        audit.write(
+            AuditEvent(
+                username=user.username,
+                role=user.role,
+                question=question,
+                routed_tables=tuple(tables),
+                sql=sql,
+                status=status,
+                row_count=row_count,
+                error=redact(error, settings.openrouter_api_key, settings.db_password) if error else None,
+            )
+        )
+        return True
+    except sqlite3.Error:
+        return False
+
+
+def _blocked_message(reason: str) -> str:
+    if reason == "table_not_allowed":
+        return "The query was blocked because it references a table outside your access."
+    if reason == "no_table":
+        return "The query was blocked because it does not read one of your allowed tables."
+    if reason == "schema_qualifier":
+        return "The query was blocked because it uses a database qualifier outside this warehouse."
+    if reason in {"forbidden_statement", "not_select", "multi_statement", "forbidden_function"}:
+        return "The query was blocked because only a single read-only SELECT is allowed."
+    if reason == "parse_error":
+        return "The query was blocked because it could not be parsed as read-only SQL."
+    return "The query was blocked by the read-only SQL check."
+
+
+def _maybe_summary(
+    llm: LlmClient,
+    question: str,
+    columns: list[str],
+    rows: list[dict],
+    assumptions: str | None,
+    source: str,
+) -> str:
+    summary = local_summary(columns, rows)
+    if source != "openrouter" or not llm.configured or len(rows) < _SUMMARY_ROW_THRESHOLD:
+        return summary
+    try:
+        text = llm.complete(build_summary_messages(question, columns, rows, assumptions)).strip()
+    except LlmError:
+        return summary
+    if not text or len(text) > 800:
+        return summary
+    return text
+
+
+def answer_question(
+    question: str,
+    user: User,
+    *,
+    settings: Settings,
+    adapter: object,
+    catalog: Catalog,
+    audit: AuditLog,
+    llm: LlmClient,
+) -> Answer:
+    text = (question or "").strip()
+    if not text:
+        return Answer(status="clarify", message="Ask a question about revenue or daily active users.")
+    text = text[:_MAX_QUESTION_CHARS]
+    allowed = set(user.allowed_tables)
+    route = route_question(text, catalog)
+
+    def finish(answer: Answer, error: str | None = None) -> Answer:
+        saved = _record(
+            audit,
+            user,
+            text,
+            answer.tables,
+            answer.sql,
+            answer.status,
+            len(answer.rows) if answer.status == "ok" else None,
+            error,
+            settings,
+        )
+        answer.audit_saved = saved
+        if not saved:
+            note = "The usage log could not be written."
+            answer.message = f"{answer.message} {note}".strip()
+        return answer
+
+    if not route.matched:
+        return finish(Answer(status="clarify", message=_clarify(catalog, allowed)))
+
+    permitted = [table for table in route.tables if table in allowed]
+    denied = [table for table in route.tables if table not in allowed]
+    if not permitted:
+        denied_titles = [topic.title for topic in route.topics if any(table in denied for table in topic.tables)]
+        verb = "is" if len(denied_titles) == 1 else "are"
+        message = (
+            f"{_join(denied_titles)} {verb} outside the {user.role} role. "
+            f"You can ask about {_join(_allowed_topics(catalog, allowed))}."
+        )
+        return finish(Answer(status="denied", message=message))
+    if len(route.tables) > 1:
+        titles = [topic.title for topic in route.topics]
+        if denied:
+            message = (
+                f"{_join(titles)} cannot be answered together, and part of that question "
+                f"is outside the {user.role} role. Ask about {_join(_allowed_topics(catalog, allowed))} on its own."
+            )
+        else:
+            message = (
+                f"That question matches {_join(titles)}. "
+                "Ask about one table at a time so the result stays on a single grain."
+            )
+        return finish(Answer(status="clarify", message=message, tables=permitted))
+
+    table = permitted[0]
+    schemas = _schemas(adapter, [table], catalog)
+    if isinstance(schemas, str):
+        return finish(Answer(status="error", message=schemas, tables=[table]))
+
+    source = "local"
+    assumptions = ""
+    sql = ""
+    llm_error: str | None = None
+    if llm.configured:
+        try:
+            raw = llm.complete(
+                build_messages(text, schemas, dialect=adapter.dialect)
+            )
+            sql, assumptions = parse_model_output(raw)
+            source = "openrouter"
+        except LlmError as exc:
+            llm_error = str(exc)
+            sql = ""
+    if not sql:
+        if source == "openrouter" and llm_error is None:
+            message = assumptions or _clarify(catalog, allowed)
+            return finish(Answer(status="clarify", message=message, tables=[table], assumptions=assumptions or None))
+        try:
+            planned = plan_sql(text, table, {column.name for column in schemas[0].columns}, adapter.dialect)
+        except PlannerError as exc:
+            return finish(Answer(status="error", message=str(exc), tables=[table]), error=str(exc))
+        sql = planned.sql
+        assumptions = planned.assumptions
+        source = "local"
+        if llm_error:
+            assumptions = (
+                f"{assumptions} The language model request failed, so this SQL came from the local planner."
+            )
+
+    verdict = check_sql(sql, {table}, dialect=adapter.dialect)
+    if not verdict.ok:
+        return finish(
+            Answer(
+                status="blocked",
+                message=_blocked_message(verdict.reason),
+                sql=sql,
+                tables=[table],
+                assumptions=assumptions or None,
+                source=source,
+            ),
+            error=verdict.reason,
+        )
+
+    try:
+        result = adapter.execute_select(sql, allowed_tables={table}, max_rows=settings.max_rows)
+    except UnsafeSQLError as exc:
+        return finish(
+            Answer(
+                status="blocked",
+                message=_blocked_message(exc.reason),
+                sql=sql,
+                tables=[table],
+                source=source,
+            ),
+            error=exc.reason,
+        )
+    except (QueryExecutionError, NotImplementedError) as exc:
+        safe = redact(str(exc), settings.openrouter_api_key, settings.db_password)
+        return finish(
+            Answer(status="error", message=f"The query failed: {safe}", sql=sql, tables=[table], source=source),
+            error=safe,
+        )
+
+    rows = [dict(row) for row in result.rows]
+    columns = list(result.columns)
+    summary = _maybe_summary(llm, text, columns, rows, assumptions, source)
+    return finish(
+        Answer(
+            status="ok",
+            message=summary,
+            summary=summary,
+            sql=sql,
+            columns=columns,
+            rows=rows,
+            tables=[table],
+            assumptions=assumptions or None,
+            source=source,
+            truncated=result.truncated,
+        ),
+        error=llm_error,
+    )

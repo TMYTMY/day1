@@ -13,6 +13,8 @@ from src.auth import authenticate, demo_accounts
 from src.config import ConfigError, Settings, load_settings, redact
 from src.db.factory import build_adapter
 from src.export import ExportMeta, result_filename, stamp_now, to_csv, to_html
+from src.knowledge.page import render_knowledge_page
+from src.knowledge.store import KnowledgeStore
 from src.llm import LlmClient
 from src.models import Answer, User
 from src.pipeline import answer_question
@@ -225,6 +227,11 @@ def _render_result(payload: dict) -> None:
                     f"Showing {min(len(rows), PREVIEW_ROWS)} rows on screen. "
                     f"The download includes {len(rows)} fetched rows."
                 )
+    notes = payload.get("knowledge_snippets") or []
+    if notes:
+        with st.expander(f"Knowledge base · {len(notes)} notes"):
+            for note in notes:
+                st.text(note)
     if payload.get("sql"):
         with st.expander("SQL"):
             st.caption(_source_caption(payload))
@@ -273,6 +280,7 @@ def _pack(question: str, answer: Answer, settings: Settings, username: str) -> d
         "stamp": stamp_now(),
         "username": username,
         "model": settings.openrouter_model,
+        "knowledge_snippets": answer.knowledge_snippets,
     }
 
 
@@ -284,6 +292,7 @@ def _run_turn(
     catalog: Catalog,
     audit: AuditLog,
     llm: LlmClient,
+    knowledge: KnowledgeStore,
 ) -> None:
     try:
         answer = answer_question(
@@ -294,6 +303,7 @@ def _run_turn(
             catalog=catalog,
             audit=audit,
             llm=llm,
+            knowledge=knowledge,
         )
     except Exception as exc:
         logger.error("answer failed: %s", type(exc).__name__)
@@ -341,11 +351,28 @@ def _sidebar(user: User, settings: Settings, adapter: object, audit: AuditLog) -
                     question = question[:77] + "..."
                 st.caption(f"{when} · {event['status']} · {question}")
         if st.button("Sign out", key="sign_out", width="stretch"):
-            st.session_state.user = None
-            st.session_state.messages = []
-            st.session_state.last_result = None
-            st.session_state.pop("pending", None)
-            st.rerun()
+            _sign_out()
+
+
+def _sign_out() -> None:
+    st.session_state.user = None
+    st.session_state.messages = []
+    st.session_state.last_result = None
+    st.session_state.pop("pending", None)
+    st.session_state.pop("nav_page", None)
+    st.session_state.pop("kb_seen_ids", None)
+    st.session_state.pop("kb_notice", None)
+    st.rerun()
+
+
+def _page_choice() -> str:
+    with st.sidebar:
+        return st.radio(
+            "Navigate",
+            options=["ask", "knowledge"],
+            format_func=lambda value: "Ask" if value == "ask" else "知識庫",
+            key="nav_page",
+        )
 
 
 def _consume_pending(
@@ -355,6 +382,7 @@ def _consume_pending(
     catalog: Catalog,
     audit: AuditLog,
     llm: LlmClient,
+    knowledge: KnowledgeStore,
 ) -> None:
     pending = st.session_state.pop("pending", None)
     prompt = st.chat_input("Ask about revenue or daily active users", key="chat")
@@ -362,7 +390,7 @@ def _consume_pending(
         pending = prompt
     if pending:
         with st.spinner("Checking access and running a read-only query..."):
-            _run_turn(pending, user, settings, adapter, catalog, audit, llm)
+            _run_turn(pending, user, settings, adapter, catalog, audit, llm, knowledge)
 
 
 def main() -> None:
@@ -379,7 +407,8 @@ def main() -> None:
             settings.openrouter_base_url,
             settings.openrouter_model,
         )
-    except ConfigError as exc:
+        knowledge = KnowledgeStore(settings)
+    except (ConfigError, OSError) as exc:
         st.title("Fieldnote")
         st.error(str(exc))
         return
@@ -395,13 +424,25 @@ def main() -> None:
             f"DB_BACKEND={settings.db_backend} is a stub in this build. "
             "Set DB_BACKEND=sqlite to use the demo database."
         )
+    page = _page_choice()
+    if page == "knowledge":
+        with st.sidebar:
+            st.markdown('<p class="fn-kicker">Signed in</p>', unsafe_allow_html=True)
+            st.subheader(user.username)
+            st.caption(f"Role · {user.role}")
+            if st.button("Sign out", key="sign_out", width="stretch"):
+                _sign_out()
+        render_knowledge_page(knowledge, settings)
+        return
+
     st.markdown('<p class="fn-kicker">Warehouse Q&A</p>', unsafe_allow_html=True)
     st.title("Fieldnote")
     st.caption(
         "Ask in English or Cantonese. The routing map picks a table, "
-        "then a read-only query runs on the columns your role can access."
+        "then a read-only query runs on the columns your role can access. "
+        "Open 知識庫 to add glossary notes for the language model."
     )
-    _consume_pending(user, settings, adapter, catalog, audit, llm)
+    _consume_pending(user, settings, adapter, catalog, audit, llm, knowledge)
     _sidebar(user, settings, adapter, audit)
     for message in st.session_state.messages:
         _render_message(message)

@@ -36,6 +36,7 @@ def build_messages(
     schemas: list[TableSchema],
     dialect: str,
     today: date | None = None,
+    knowledge_notes: list[str] | None = None,
 ) -> list[dict[str, str]]:
     """Build chat messages. The question is user content. No credentials are included."""
     current = today or date.today()
@@ -57,6 +58,14 @@ def build_messages(
         f"- Today is {current.isoformat()}.\n\n"
         f"Schema:\n{schema_text}"
     )
+    if knowledge_notes:
+        rendered = "\n".join(f"- {note}" for note in knowledge_notes)
+        system += (
+            "\n\nSupplemental notes from the knowledge base. "
+            "Use them to interpret business terms. "
+            "Query only the tables and columns in the schema above.\n"
+            f"{rendered}"
+        )
     return [
         {"role": "system", "content": system},
         {"role": "user", "content": question.strip()},

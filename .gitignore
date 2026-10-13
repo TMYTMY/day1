@@ -8,5 +8,6 @@ __pycache__/
 data/*.db
 data/*.db-wal
 data/*.db-shm
+data/knowledge/
 *.egg-info/
 .DS_Store

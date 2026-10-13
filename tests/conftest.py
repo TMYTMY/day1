@@ -37,6 +37,10 @@ def env(tmp_path):
         openrouter_model="openai/gpt-4o-mini",
         openrouter_base_url="https://openrouter.ai/api/v1",
         max_rows=500,
+        knowledge_path=tmp_path / "knowledge",
+        embedding_provider="local",
+        embedding_model="openai/text-embedding-3-small",
+        embedding_api_key=None,
     )
     return SimpleNamespace(
         settings=settings,

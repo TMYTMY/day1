@@ -32,7 +32,7 @@ class _Scripted:
         return self.replies.pop(0)
 
 
-def _ask(env, user, question, llm=None):
+def _ask(env, user, question, llm=None, knowledge=None):
     return answer_question(
         question,
         user,
@@ -41,6 +41,7 @@ def _ask(env, user, question, llm=None):
         catalog=env.catalog,
         audit=env.audit,
         llm=llm or _Off(),
+        knowledge=knowledge,
     )
 
 

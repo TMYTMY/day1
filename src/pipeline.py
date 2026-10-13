@@ -8,6 +8,7 @@ from dataclasses import replace
 from src.audit import AuditEvent, AuditLog
 from src.config import Settings, redact
 from src.db.sqlite import QueryExecutionError
+from src.knowledge.store import KnowledgeStore
 from src.llm import LlmClient, LlmError, parse_model_output
 from src.local_sql import PlannerError, plan_sql
 from src.models import Answer, TableSchema, User
@@ -142,6 +143,7 @@ def answer_question(
     catalog: Catalog,
     audit: AuditLog,
     llm: LlmClient,
+    knowledge: KnowledgeStore | None = None,
 ) -> Answer:
     text = (question or "").strip()
     if not text:
@@ -204,16 +206,30 @@ def answer_question(
     assumptions = ""
     sql = ""
     llm_error: str | None = None
+    notes: list[str] = []
     if llm.configured:
+        if knowledge is not None:
+            try:
+                notes = knowledge.prompt_notes(text)
+            except Exception:
+                notes = []
         try:
             raw = llm.complete(
-                build_messages(text, schemas, dialect=adapter.dialect)
+                build_messages(
+                    text,
+                    schemas,
+                    dialect=adapter.dialect,
+                    knowledge_notes=notes or None,
+                )
             )
             sql, assumptions = parse_model_output(raw)
             source = "openrouter"
+            if notes:
+                assumptions = f"{assumptions} Knowledge base notes were added to the prompt.".strip()
         except LlmError as exc:
             llm_error = str(exc)
             sql = ""
+            notes = []
     if not sql:
         if source == "openrouter" and llm_error is None:
             message = assumptions or _clarify(catalog, allowed)
@@ -279,6 +295,7 @@ def answer_question(
             assumptions=assumptions or None,
             source=source,
             truncated=result.truncated,
+            knowledge_snippets=notes if source == "openrouter" else [],
         ),
         error=llm_error,
     )

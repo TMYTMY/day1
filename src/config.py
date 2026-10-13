@@ -41,12 +41,18 @@ class Settings:
     openrouter_model: str
     openrouter_base_url: str
     max_rows: int
+    knowledge_path: Path
+    embedding_provider: str
+    embedding_model: str
+    embedding_api_key: str | None
 
     def __repr__(self) -> str:
         key_state = "set" if self.openrouter_api_key else "unset"
+        embed_key = "set" if self.embedding_api_key else "unset"
         return (
             f"Settings(db_backend={self.db_backend!r}, "
-            f"model={self.openrouter_model!r}, api_key={key_state})"
+            f"model={self.openrouter_model!r}, api_key={key_state}, "
+            f"embedding={self.embedding_provider!r}, embedding_key={embed_key})"
         )
 
 
@@ -78,6 +84,12 @@ def load_settings() -> Settings:
     except ValueError as exc:
         raise ConfigError("MAX_RESULT_ROWS must be an integer.") from exc
     max_rows = max(1, min(max_rows, 5000))
+    embedding_provider = os.environ.get("EMBEDDING_PROVIDER", "local").strip().lower() or "local"
+    if embedding_provider not in {"local", "openrouter"}:
+        raise ConfigError("EMBEDDING_PROVIDER must be local or openrouter.")
+    embedding_key = _optional("EMBEDDING_API_KEY")
+    if embedding_provider == "openrouter" and not embedding_key:
+        embedding_key = _optional("OPENROUTER_API_KEY")
     return Settings(
         db_backend=backend,
         db_path=_resolve(os.environ.get("DB_PATH", ""), "data/demo.db"),
@@ -99,4 +111,9 @@ def load_settings() -> Settings:
         ).strip()
         or "https://openrouter.ai/api/v1",
         max_rows=max_rows,
+        knowledge_path=_resolve(os.environ.get("KNOWLEDGE_PATH", ""), "data/knowledge"),
+        embedding_provider=embedding_provider,
+        embedding_model=os.environ.get("EMBEDDING_MODEL", "openai/text-embedding-3-small").strip()
+        or "openai/text-embedding-3-small",
+        embedding_api_key=embedding_key,
     )

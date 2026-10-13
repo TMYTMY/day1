@@ -45,3 +45,4 @@ class Answer:
     truncated: bool = False
     summary: str | None = None
     audit_saved: bool = True
+    knowledge_snippets: list[str] = field(default_factory=list)

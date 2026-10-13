@@ -42,6 +42,16 @@ python -m src.db.seed
 
 With no API key, a local planner writes the SQL and the screen says so. With a key, the model writes it. Either way the query has to pass the SELECT allowlist before it runs.
 
+## Knowledge base
+
+Open **知識庫** in the sidebar after you sign in. Drop schema docs, DDL, a business glossary, or a synonym list onto the uploader. Accepted types are `.csv`, `.sql`, `.ddl`, `.md`, `.txt`, and `.json`, up to 2 MB each.
+
+Each file is split into chunks and embedded into a local index at `data/knowledge/` (gitignored). The dashboard lists every file with its type, chunk count, and last updated time. **Re-index** rebuilds that file with the current embedder. **Delete** removes the file and its chunks. Uploaded SQL is stored as text and stays out of the warehouse connection.
+
+Routing stays the default path. A question still has to match the routing map and the role's tables before any SQL is written. Matching glossary snippets are retrieved after that, and only when a language-model key is set. They are appended to the model prompt as notes. The schema in that prompt remains the allowlist. The local planner answers from the routing map alone, so the demo still answers revenue and DAU questions with an empty knowledge base.
+
+The index is a SQLite file plus NumPy cosine search, under `data/knowledge/index.sqlite`. Chroma and FAISS would need a model download or a native library; this demo stays on SQLite so it runs with no extra services. `src/knowledge/store.py` is the place to swap in another engine later. The default embedder hashes tokens on this machine (`EMBEDDING_PROVIDER=local`) and needs no key. Set `EMBEDDING_PROVIDER=openrouter` to call the embeddings endpoint instead. If you change provider or model, re-index existing files so the vectors share one space.
+
 ## Environment
 
 | Variable | Purpose |
@@ -55,6 +65,10 @@ With no API key, a local planner writes the SQL and the screen says so. With a k
 | `ATHENA_REGION`, `ATHENA_DATABASE`, `ATHENA_WORKGROUP`, `ATHENA_OUTPUT` | Future Athena adapter. Unused by SQLite. |
 | `AUDIT_PATH` | Usage log. Default `data/audit.db`. |
 | `MAX_RESULT_ROWS` | Cap on fetched rows. Default 500. |
+| `EMBEDDING_PROVIDER` | `local` (default) or `openrouter`. Local hashing needs no key. |
+| `EMBEDDING_MODEL` | Embedding model id when the provider is `openrouter`. Default `openai/text-embedding-3-small`. |
+| `EMBEDDING_API_KEY` | Key for the embeddings call. Falls back to `OPENROUTER_API_KEY` when the provider is `openrouter`. |
+| `KNOWLEDGE_PATH` | On-disk index directory. Default `data/knowledge`. |
 
 The API key and database password are read from the environment inside the server process. They are not written into the prompt, the page, or the export.
 
@@ -76,13 +90,16 @@ Questions that match nothing get a clarifying reply that lists only the topics t
 flowchart LR
   ask[Question] --> auth[Role and allowed tables]
   auth --> route[Routing map]
-  route --> prompt[Schema for matched permitted tables]
+  route --> prompt[Schema for the matched table]
+  kb[Knowledge base notes] -.-> prompt
   prompt --> sql[OpenRouter or local planner]
   sql --> guard[SELECT allowlist]
   guard --> db[Read-only database]
   db --> out[Table, CSV, HTML]
   out --> log[Audit log]
 ```
+
+The dotted notes are optional. They are retrieved after the routing map has already chosen one permitted table, and only for a language-model request. The routing map still chooses the table.
 
 The allowlist parses the statement and keeps a single `SELECT` or `WITH ... SELECT`. Inserts, updates, deletes, DDL, pragmas, attached databases, and file functions are rejected. Physical tables have to be inside the caller's allowlist, including tables hidden behind a CTE. SQLite is opened with `mode=ro` and `PRAGMA query_only`, so a write still fails if a statement gets past the parser.
 
@@ -100,4 +117,4 @@ Each question is appended to the audit database with the user, role, tables, SQL
 pytest
 ```
 
-The tests cover routing, the role map, the SELECT allowlist, blocked writes, CSV/HTML export, and the revenue, DAU, unknown-topic, and permission paths.
+The tests cover routing, the role map, the SELECT allowlist, blocked writes, CSV/HTML export, the revenue, DAU, unknown-topic, and permission paths, and the knowledge base (upload, search, delete, and notes that do not replace routing).

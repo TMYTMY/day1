@@ -197,12 +197,22 @@ class KnowledgeStore:
         text = data.decode("utf-8-sig", errors="replace").strip()
         if not text:
             raise KnowledgeError("That file has no text to index.")
+        content_hash = hashlib.sha256(data).hexdigest()
+        with self._lock, self._session() as conn:
+            existing = conn.execute(
+                "SELECT id, filename FROM documents WHERE content_hash = ? AND embedding_id = ?",
+                (content_hash, self.embedder.embedding_id),
+            ).fetchone()
+        if existing is not None:
+            raise KnowledgeError(
+                f"That file is already in the knowledge base as {existing['filename']}."
+            )
         return self._write_document(
             document_id=uuid4().hex,
             filename=safe_name,
             extension=extension,
             byte_size=len(data),
-            content_hash=hashlib.sha256(data).hexdigest(),
+            content_hash=content_hash,
             body=text,
             updated_at=_now(),
             owner=owner,

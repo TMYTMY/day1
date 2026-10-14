@@ -318,6 +318,15 @@ def test_index_written_before_scoping_is_migrated_and_hidden(env):
     assert store.search("revenue by product", role="growth")[0].filename == "legacy.md"
 
 
+def test_uploading_the_same_bytes_twice_is_rejected(env):
+    store = KnowledgeStore(env.settings)
+    store.add_document("glossary.md", GLOSSARY, owner="analyst", owner_role="analyst")
+    with pytest.raises(KnowledgeError, match=r"already in the knowledge base as glossary\.md"):
+        store.add_document("copy.md", GLOSSARY, owner="analyst", owner_role="analyst")
+    names = [item.filename for item in store.list_documents(role="analyst")]
+    assert names == ["glossary.md"]
+
+
 def test_listing_documents_a_hundred_times_emits_no_resource_warning(env):
     import gc
     import warnings

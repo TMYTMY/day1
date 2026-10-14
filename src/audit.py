@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+
+def _stamp() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 @dataclass(frozen=True)
@@ -44,6 +48,19 @@ class AuditLog:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_audit_user ON audit_events(username, id)"
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS login_attempts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts TEXT NOT NULL,
+                    username TEXT NOT NULL,
+                    success INTEGER NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_login_attempts ON login_attempts(username, id)"
+            )
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path, timeout=5)
@@ -60,7 +77,7 @@ class AuditLog:
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    _stamp(),
                     event.username,
                     event.role,
                     event.question[:2000],
@@ -85,3 +102,26 @@ class AuditLog:
                 (username, limit),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def record_login(self, username: str, success: bool) -> None:
+        """Log one sign-in attempt, success or failure."""
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO login_attempts (ts, username, success) VALUES (?, ?, ?)",
+                (_stamp(), username, int(success)),
+            )
+
+    def recent_failures(self, username: str, window_seconds: int = 300) -> int:
+        """Count failed attempts for one username inside the window."""
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=window_seconds)
+        stamp = cutoff.strftime("%Y-%m-%dT%H:%M:%SZ")
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS failures
+                FROM login_attempts
+                WHERE username = ? AND success = 0 AND ts >= ?
+                """,
+                (username, stamp),
+            ).fetchone()
+        return int(row["failures"])

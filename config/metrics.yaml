@@ -1,0 +1,81 @@
+# Metric catalogue. Matching is synonym-based and deterministic.
+# Every definition below is demo content until a business owner confirms it.
+# Do not treat these sentences as a real finance or growth definition.
+
+- id: revenue_by_product
+  title: Revenue by product
+  synonyms:
+    - revenue
+    - revenues
+    - sales
+    - gmv
+    - income
+    - bookings
+    - turnover
+    - 收入
+    - 營收
+    - 營業額
+    - 营业额
+  table: revenue
+  grain: [event_date, product, region, channel]
+  # channel is not additive: a channel split is a different metric.
+  additive_over: [event_date, product, region]
+  definition: "Recognised revenue in USD, net of cancellations. Channel splits sum to the total." # PLACEHOLDER — 需由業務方確認
+  owner: finance-reporting
+  effective_from: 2026-06-15
+  supersedes: null
+  exceptions: "Excludes internal test accounts." # PLACEHOLDER — 需由業務方確認
+
+- id: revenue_by_channel
+  title: Revenue by channel
+  synonyms:
+    - by channel
+    - per channel
+    - 按渠道
+    - 渠道
+  table: revenue
+  grain: [event_date, product, region, channel]
+  additive_over: [event_date, product, region, channel]
+  definition: "PLACEHOLDER — 需由業務方確認" # PLACEHOLDER — 需由業務方確認
+  owner: placeholder
+  effective_from: 2026-06-15
+  supersedes: null
+  exceptions: "PLACEHOLDER — 需由業務方確認" # PLACEHOLDER — 需由業務方確認
+
+- id: dau_by_platform
+  title: DAU by platform
+  synonyms:
+    - dau
+    - daily active
+    - daily active users
+    - active users
+    - 日活
+    - 日活躍
+    - 活躍用戶
+    - 活跃用户
+  table: dau
+  grain: [event_date, platform, country]
+  additive_over: [event_date, platform]
+  definition: "PLACEHOLDER — 需由業務方確認" # PLACEHOLDER — 需由業務方確認
+  owner: placeholder
+  effective_from: 2026-06-15
+  supersedes: null
+  exceptions: "PLACEHOLDER — 需由業務方確認" # PLACEHOLDER — 需由業務方確認
+
+- id: dau_by_country
+  title: DAU by country
+  synonyms:
+    - by country
+    - per country
+    - 按國家
+    - 按国家
+    - 國家
+    - 国家
+  table: dau
+  grain: [event_date, platform, country]
+  additive_over: [event_date, platform, country]
+  definition: "PLACEHOLDER — 需由業務方確認" # PLACEHOLDER — 需由業務方確認
+  owner: placeholder
+  effective_from: 2026-06-15
+  supersedes: null
+  exceptions: "PLACEHOLDER — 需由業務方確認" # PLACEHOLDER — 需由業務方確認

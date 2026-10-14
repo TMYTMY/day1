@@ -148,6 +148,75 @@ def test_openrouter_embedding_error_redacts_the_key(env):
     assert secret not in str(caught.value)
 
 
+def test_openrouter_embeddings_retry_then_reuse_the_cache(env, monkeypatch):
+    slept: list[float] = []
+    monkeypatch.setattr("src.knowledge.embed.time.sleep", lambda seconds: slept.append(seconds))
+    secret = "sk-embed-secret"
+    settings = replace(
+        env.settings,
+        embedding_provider="openrouter",
+        embedding_api_key=secret,
+    )
+    calls = {"n": 0}
+
+    class Response:
+        def __init__(self, status, embeddings=None, retry_after=None):
+            self.status_code = status
+            self.text = "slow down" if status != 200 else ""
+            self.headers = {} if retry_after is None else {"Retry-After": str(retry_after)}
+            self._embeddings = embeddings or []
+
+        def json(self):
+            return {
+                "data": [
+                    {"index": index, "embedding": vector}
+                    for index, vector in enumerate(self._embeddings)
+                ]
+            }
+
+    def post(url, headers, json, timeout):
+        calls["n"] += 1
+        assert headers["Authorization"] == f"Bearer {secret}"
+        assert url.endswith("/embeddings")
+        assert secret not in str(json)
+        if calls["n"] < 3:
+            return Response(429)
+        return Response(200, embeddings=[[0.2, 0.1, 0.7]])
+
+    store = KnowledgeStore(settings, post=post)
+    first = store.embedder.embed(["northstar revenue glossary"])
+    assert calls["n"] == 3
+    assert first.shape == (1, 3)
+    assert slept == [1, 2]
+    store.embedder.embed(["northstar revenue glossary"])
+    assert calls["n"] == 3
+
+    def post_later(url, headers, json, timeout):
+        calls["n"] += 1
+        if calls["n"] == 4:
+            return Response(429, retry_after=0)
+        return Response(200, embeddings=[[0.4, 0.4, 0.2]])
+
+    store.embedder._post = post_later
+    store.embedder.embed(["a different glossary note"])
+    assert calls["n"] == 5
+    assert slept[-1] == 0
+
+    def post_rejected(url, headers, json, timeout):
+        calls["n"] += 1
+        return Response(400)
+
+    store.embedder._post = post_rejected
+    with pytest.raises(KnowledgeError, match="400"):
+        store.add_document(
+            "fresh.md",
+            b"yet another glossary note",
+            owner="analyst",
+            owner_role="analyst",
+        )
+    assert calls["n"] == 6
+
+
 def test_rules_still_answer_without_using_notes_when_no_model_is_configured(env):
     store = KnowledgeStore(env.settings)
     store.add_document("glossary.md", GLOSSARY, owner="analyst", owner_role="analyst")

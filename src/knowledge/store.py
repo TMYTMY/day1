@@ -139,9 +139,17 @@ class KnowledgeStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_chunks_document
                     ON chunks(document_id);
+                CREATE TABLE IF NOT EXISTS embedding_cache (
+                    content_hash TEXT NOT NULL,
+                    embedding_id TEXT NOT NULL,
+                    dim INTEGER NOT NULL,
+                    vector BLOB NOT NULL,
+                    PRIMARY KEY (content_hash, embedding_id)
+                );
                 """
             )
             _add_missing_columns(conn)
+        self.embedder.bind_cache(self._cached_embedding, self._store_embedding)
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path, timeout=5)
@@ -149,6 +157,38 @@ class KnowledgeStore:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
         return conn
+
+    def _cached_embedding(self, text: str) -> np.ndarray | None:
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        with self._lock, self._session() as conn:
+            row = conn.execute(
+                """
+                SELECT dim, vector FROM embedding_cache
+                WHERE content_hash = ? AND embedding_id = ?
+                """,
+                (digest, self.embedder.embedding_id),
+            ).fetchone()
+        if row is None:
+            return None
+        vector = np.frombuffer(bytes(row["vector"]), dtype=np.float32).copy()
+        if vector.shape != (int(row["dim"]),):
+            return None
+        return vector
+
+    def _store_embedding(self, text: str, vector: np.ndarray) -> None:
+        array = np.asarray(vector, dtype=np.float32).reshape(-1)
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        with self._lock, self._session() as conn:
+            conn.execute(
+                """
+                INSERT INTO embedding_cache (content_hash, embedding_id, dim, vector)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(content_hash, embedding_id) DO UPDATE SET
+                    dim = excluded.dim,
+                    vector = excluded.vector
+                """,
+                (digest, self.embedder.embedding_id, int(array.shape[0]), array.tobytes()),
+            )
 
     @contextmanager
     def _session(self):

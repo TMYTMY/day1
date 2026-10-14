@@ -85,7 +85,8 @@ def test_a_superseded_metric_is_not_matched(tmp_path):
             },
         ],
     )
-    assert match_metrics("total revenue", load_metrics(future_path), today=TODAY) == []
+    later = match_metrics("total revenue", load_metrics(future_path), today=TODAY)
+    assert [metric.id for metric in later] == ["revenue_old"]
 
 
 def test_definition_hash_is_stable_and_twelve_hex_characters():

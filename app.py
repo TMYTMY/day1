@@ -15,7 +15,7 @@ import streamlit as st
 
 from src.audit import AuditLog
 from src.auth import authenticate
-from src.config import ConfigError, Settings, load_settings, redact
+from src.config import ConfigError, Settings, load_settings
 from src.db.factory import build_adapter
 from src.export import ExportMeta, result_filename, stamp_now, to_csv, to_html
 from src.knowledge.page import render_knowledge_page
@@ -333,12 +333,11 @@ def _run_turn(
             llm=llm,
             knowledge=knowledge,
         )
-    except Exception as exc:
-        logger.error("answer failed: %s", type(exc).__name__)
+    except Exception:
+        logger.exception("answer failed")
         answer = Answer(
             status="error",
-            message="The question could not be answered. "
-            + redact(str(exc), settings.openrouter_api_key, settings.db_password),
+            message="The question could not be answered. The server log has the details.",
         )
     payload = _pack(question, answer, settings, user.username)
     st.session_state.messages.append({"id": uuid4().hex[:8], "role": "user", "text": question})

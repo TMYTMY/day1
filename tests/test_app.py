@@ -193,3 +193,23 @@ def test_the_idle_window_is_thirty_minutes():
     assert app_module._session_expired(None) is False
     assert app_module._session_expired(datetime.now(timezone.utc) - timedelta(seconds=1799)) is False
     assert app_module._session_expired(datetime.now(timezone.utc) - timedelta(seconds=1801)) is True
+
+
+def test_a_failed_answer_shows_a_fixed_message_and_not_the_exception(monkeypatch, tmp_path):
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "demo.db"))
+    monkeypatch.setenv("AUDIT_PATH", str(tmp_path / "audit.db"))
+    monkeypatch.setenv("DB_BACKEND", "sqlite")
+    monkeypatch.setenv("KNOWLEDGE_PATH", str(tmp_path / "knowledge"))
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "local")
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("secret path /etc/passwd")
+
+    monkeypatch.setattr("src.pipeline.answer_question", boom)
+    at = AppTest.from_file(str(ROOT / "app.py"), default_timeout=60).run(timeout=60)
+    at = _sign_in(at, "analyst", "analyst")
+    at.chat_input[0].set_value("What was total revenue by product?").run(timeout=60)
+    page = _blob(at)
+    assert "/etc/passwd" not in page
+    assert "The question could not be answered. The server log has the details." in page

@@ -21,6 +21,20 @@ Copy `.env.example` to `.env` only if you want to override the defaults. The sam
 python -m src.db.seed
 ```
 
+## Seeded data-quality defects
+
+The demo warehouse is not a clean extract. `src/db/seed.py` plants five deterministic problems in `revenue`, and `python -m src.db.quality` counts them:
+
+```
+duplicate_rows: 3
+late_arriving_backfill: 279
+null_channel: 48
+region_rename: 378
+unit_contamination: 189
+```
+
+A few June grain keys (`event_date`, `product`, `region`, `channel`) were ingested twice, so a `SUM` of those keys is high. Harbor has no August rows in the daily load; those 279 rows arrive on 2026-09-18 as a backfill, which is why a monthly Harbor trend dips and then fills in. Some Harbor `partner` rows in June have a NULL `channel`. From 2026-09-01 the source system renamed `EMEA` to `E.U.`, so a `GROUP BY region` splits one region in two. From 2026-10-01 through 2026-10-07, `revenue_usd` holds the EUR list price (the USD figure times 1.10) with no FX conversion, and `amount_currency` is `EUR`.
+
 ## Serving it beyond localhost
 
 `.streamlit/config.toml` binds the server to `127.0.0.1` with `enableCORS = true`, so the app answers on this machine only. Do not change `address` to reach another machine on the LAN. Put a reverse proxy in front instead, and keep TLS and access control at the proxy:

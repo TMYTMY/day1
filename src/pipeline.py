@@ -12,7 +12,7 @@ from src.db.sqlite import QueryExecutionError
 from src.knowledge.store import KnowledgeStore
 from src.llm import LlmClient, LlmError, parse_model_output
 from src.local_sql import PlannerError, plan_sql
-from src.metrics import active_metrics, load_metrics, match_metrics
+from src.metrics import active_metrics, definition_hash, load_metrics, match_metrics
 from src.models import Answer, TableSchema, User
 from src.present import local_summary
 from src.prompt import build_messages, build_summary_messages
@@ -83,6 +83,8 @@ def _record(
     row_count: int | None,
     error: str | None,
     settings: Settings,
+    metric_id: str | None = None,
+    definition_digest: str | None = None,
 ) -> bool:
     try:
         audit.write(
@@ -95,6 +97,8 @@ def _record(
                 status=status,
                 row_count=row_count,
                 error=redact(error, settings.openrouter_api_key, settings.db_password) if error else None,
+                metric_id=metric_id,
+                definition_hash=definition_digest,
             )
         )
         return True
@@ -210,8 +214,13 @@ def answer_question(
     selected = None
 
     def finish(answer: Answer, error: str | None = None) -> Answer:
-        if selected is not None and answer.metric_id is None:
-            answer.metric_id = selected.id
+        metric_id = answer.metric_id
+        digest = None
+        if selected is not None:
+            metric_id = selected.id
+            digest = definition_hash(selected)
+            if answer.metric_id is None:
+                answer.metric_id = selected.id
         saved = _record(
             audit,
             user,
@@ -222,6 +231,8 @@ def answer_question(
             len(answer.rows) if answer.status == "ok" else None,
             error,
             settings,
+            metric_id=metric_id,
+            definition_digest=digest,
         )
         answer.audit_saved = saved
         if not saved:

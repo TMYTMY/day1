@@ -13,6 +13,15 @@ def _stamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _ensure_metric_columns(conn: sqlite3.Connection) -> None:
+    """Add trace columns on databases created before the metric catalogue."""
+    present = {row["name"] for row in conn.execute("PRAGMA table_info(audit_events)")}
+    if "metric_id" not in present:
+        conn.execute("ALTER TABLE audit_events ADD COLUMN metric_id TEXT")
+    if "definition_hash" not in present:
+        conn.execute("ALTER TABLE audit_events ADD COLUMN definition_hash TEXT")
+
+
 @dataclass(frozen=True)
 class AuditEvent:
     username: str
@@ -23,6 +32,8 @@ class AuditEvent:
     status: str
     row_count: int | None
     error: str | None
+    metric_id: str | None = None
+    definition_hash: str | None = None
 
 
 class AuditLog:
@@ -81,6 +92,7 @@ class AuditLog:
                 )
                 """
             )
+            _ensure_metric_columns(conn)
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path, timeout=5)
@@ -102,8 +114,9 @@ class AuditLog:
             conn.execute(
                 """
                 INSERT INTO audit_events (
-                    ts, username, role, question, routed_tables, sql, status, row_count, error
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ts, username, role, question, routed_tables, sql, status, row_count, error,
+                    metric_id, definition_hash
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     _stamp(),
@@ -115,6 +128,8 @@ class AuditLog:
                     event.status,
                     event.row_count,
                     (event.error or "")[:500] or None,
+                    (event.metric_id or "")[:200] or None,
+                    (event.definition_hash or "")[:64] or None,
                 ),
             )
 

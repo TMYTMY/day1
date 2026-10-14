@@ -62,6 +62,25 @@ class AuditLog:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_login_attempts ON login_attempts(username, id)"
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS answer_cache (
+                    question TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    PRIMARY KEY (question, role)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS llm_calls (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts TEXT NOT NULL
+                )
+                """
+            )
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path, timeout=5)
@@ -135,3 +154,51 @@ class AuditLog:
                 (username, stamp),
             ).fetchone()
         return int(row["failures"])
+
+    def cached_answer(self, question: str, role: str) -> str | None:
+        """Return a cached answer payload for this question and role, if it is under 24 hours old."""
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        with self._session() as conn:
+            row = conn.execute(
+                """
+                SELECT payload, created_at FROM answer_cache
+                WHERE question = ? AND role = ?
+                """,
+                (question, role),
+            ).fetchone()
+            if row is None:
+                return None
+            if row["created_at"] < cutoff:
+                conn.execute(
+                    "DELETE FROM answer_cache WHERE question = ? AND role = ?",
+                    (question, role),
+                )
+                return None
+            return str(row["payload"])
+
+    def remember_answer(self, question: str, role: str, payload: str) -> None:
+        with self._session() as conn:
+            conn.execute(
+                """
+                INSERT INTO answer_cache (question, role, created_at, payload)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(question, role) DO UPDATE SET
+                    created_at = excluded.created_at,
+                    payload = excluded.payload
+                """,
+                (question, role, _stamp(), payload),
+            )
+
+    def llm_calls_today(self) -> int:
+        """Count language-model calls since 00:00 UTC."""
+        start = datetime.now(timezone.utc).strftime("%Y-%m-%dT00:00:00Z")
+        with self._session() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS calls FROM llm_calls WHERE ts >= ?",
+                (start,),
+            ).fetchone()
+        return int(row["calls"])
+
+    def record_llm_call(self) -> None:
+        with self._session() as conn:
+            conn.execute("INSERT INTO llm_calls (ts) VALUES (?)", (_stamp(),))

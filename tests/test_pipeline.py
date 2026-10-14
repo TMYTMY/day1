@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 from src.models import ColumnInfo, TableSchema
 from src.pipeline import answer_question
 from src.prompt import build_messages
@@ -130,6 +132,57 @@ def test_question_text_is_not_copied_into_sql(env):
     assert answer.status == "ok"
     assert "DROP" not in answer.sql.upper()
     assert env.adapter.row_count("revenue") > 0
+
+
+def test_the_same_question_does_not_call_the_language_model_twice(env, monkeypatch):
+    calls = {"n": 0}
+    llm = _Scripted(
+        [
+            '{"sql": "SELECT product, SUM(revenue_usd) AS revenue_usd FROM revenue GROUP BY product", "assumptions": "Grouped by product."}'
+        ]
+    )
+    original = llm.complete
+
+    def wrapped(messages):
+        calls["n"] += 1
+        return original(messages)
+
+    monkeypatch.setattr(llm, "complete", wrapped)
+    question = "What was total revenue by product over the last 90 days?"
+    first = _ask(env, env.analyst, question, llm=llm)
+    assert first.status == "ok"
+    assert first.source == "openrouter"
+    assert calls["n"] == 1
+    second = _ask(env, env.analyst, question, llm=llm)
+    assert second.status == "ok"
+    assert second.sql == first.sql
+    assert calls["n"] == 1
+
+
+def test_daily_language_model_cap_uses_the_local_planner(env, monkeypatch):
+    calls = {"n": 0}
+    llm = _Scripted(['{"sql": "SELECT 1 FROM revenue", "assumptions": "from the model"}'])
+    original = llm.complete
+
+    def wrapped(messages):
+        calls["n"] += 1
+        return original(messages)
+
+    monkeypatch.setattr(llm, "complete", wrapped)
+    settings = replace(env.settings, max_llm_calls_per_day=0)
+    answer = answer_question(
+        "What was total revenue by product over the last 90 days?",
+        env.analyst,
+        settings=settings,
+        adapter=env.adapter,
+        catalog=env.catalog,
+        audit=env.audit,
+        llm=llm,
+    )
+    assert calls["n"] == 0
+    assert answer.status == "ok"
+    assert answer.source == "local"
+    assert "daily language-model call limit" in (answer.assumptions or "")
 
 
 def test_prompt_contains_only_the_supplied_schema():

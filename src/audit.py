@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -28,7 +29,7 @@ class AuditLog:
     def __init__(self, path: Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as conn:
+        with self._session() as conn:
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS audit_events (
@@ -68,8 +69,17 @@ class AuditLog:
         conn.execute("PRAGMA journal_mode=WAL")
         return conn
 
+    @contextmanager
+    def _session(self):
+        conn = self._connect()
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
+
     def write(self, event: AuditEvent) -> None:
-        with self._connect() as conn:
+        with self._session() as conn:
             conn.execute(
                 """
                 INSERT INTO audit_events (
@@ -90,7 +100,7 @@ class AuditLog:
             )
 
     def recent(self, username: str, limit: int = 8) -> list[dict]:
-        with self._connect() as conn:
+        with self._session() as conn:
             rows = conn.execute(
                 """
                 SELECT ts, question, status, routed_tables, row_count
@@ -105,7 +115,7 @@ class AuditLog:
 
     def record_login(self, username: str, success: bool) -> None:
         """Log one sign-in attempt, success or failure."""
-        with self._connect() as conn:
+        with self._session() as conn:
             conn.execute(
                 "INSERT INTO login_attempts (ts, username, success) VALUES (?, ?, ?)",
                 (_stamp(), username, int(success)),
@@ -115,7 +125,7 @@ class AuditLog:
         """Count failed attempts for one username inside the window."""
         cutoff = datetime.now(timezone.utc) - timedelta(seconds=window_seconds)
         stamp = cutoff.strftime("%Y-%m-%dT%H:%M:%SZ")
-        with self._connect() as conn:
+        with self._session() as conn:
             row = conn.execute(
                 """
                 SELECT COUNT(*) AS failures

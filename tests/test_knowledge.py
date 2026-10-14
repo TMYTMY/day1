@@ -318,6 +318,22 @@ def test_index_written_before_scoping_is_migrated_and_hidden(env):
     assert store.search("revenue by product", role="growth")[0].filename == "legacy.md"
 
 
+def test_listing_documents_a_hundred_times_emits_no_resource_warning(env):
+    import gc
+    import warnings
+
+    store = KnowledgeStore(env.settings)
+    store.add_document("glossary.md", GLOSSARY, owner="analyst", owner_role="analyst")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", ResourceWarning)
+        for _ in range(100):
+            listed = store.list_documents(role="analyst")
+        assert listed and listed[0].filename == "glossary.md"
+        gc.collect()
+    leaked = [item for item in caught if issubclass(item.category, ResourceWarning)]
+    assert leaked == []
+
+
 def test_prompt_marks_notes_as_data():
     schema = TableSchema(
         name="revenue",

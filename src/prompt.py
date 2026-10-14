@@ -37,6 +37,10 @@ def format_schema(schema: TableSchema) -> str:
     return "\n".join(lines)
 
 
+# Bump when the shape of build_messages changes. Answer-cache keys include this.
+PROMPT_VERSION = "1"
+
+
 def build_messages(
     question: str,
     schemas: list[TableSchema],

@@ -5,10 +5,10 @@ from datetime import date
 import yaml
 
 from src.config import ROOT
-from src.metrics import definition_hash, load_metrics, match_metrics
+from src.metrics import definition_hash, load_metrics, match_metrics, metric_cache_key
 from src.models import Answer, ColumnInfo, TableSchema
 from src.pipeline import _dump_answer, _load_answer, answer_question
-from src.prompt import build_messages
+from src.prompt import PROMPT_VERSION, build_messages
 from src.sql_guard import check_sql
 
 
@@ -408,7 +408,18 @@ def test_a_cached_answer_for_another_metric_is_not_reused(env):
             metric_id="not_the_selected_metric",
         )
     )
-    env.audit.remember_answer(question, env.analyst.role, metric.id, definition_hash(metric), stale)
+    env.audit.remember_answer(
+        question,
+        env.analyst.role,
+        metric.id,
+        definition_hash(metric),
+        stale,
+        cache_key=metric_cache_key(
+            metric,
+            model=env.settings.openrouter_model,
+            prompt_version=PROMPT_VERSION,
+        ),
+    )
     llm = _Scripted(
         [
             '{"sql": "SELECT product, SUM(revenue_usd) AS revenue_usd FROM revenue GROUP BY product /* fresh */", "assumptions": "fresh"}'

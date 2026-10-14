@@ -236,6 +236,8 @@ def _chart(frame: pd.DataFrame) -> None:
 
 
 def _render_result(payload: dict) -> None:
+    if payload.get("grain_warning"):
+        st.warning(payload["grain_warning"])
     summary = payload.get("summary") or payload.get("message") or ""
     if summary:
         st.markdown(summary)
@@ -293,6 +295,8 @@ def _render_message(message: dict) -> None:
             st.warning(payload["message"])
         else:
             st.error(payload["message"])
+            if payload.get("grain_warning"):
+                st.warning(payload["grain_warning"])
             if status == "blocked" and payload.get("sql"):
                 with st.expander("Blocked SQL"):
                     st.code(payload["sql"], language="sql")
@@ -317,6 +321,8 @@ def _pack(question: str, answer: Answer, settings: Settings, username: str) -> d
         "username": username,
         "model": settings.openrouter_model,
         "knowledge_snippets": answer.knowledge_snippets,
+        "metric_id": answer.metric_id,
+        "grain_warning": answer.grain_warning,
     }
 
 

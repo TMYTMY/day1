@@ -217,3 +217,21 @@ def test_a_failed_answer_shows_a_fixed_message_and_not_the_exception(monkeypatch
     page = _blob(at)
     assert "/etc/passwd" not in page
     assert "The question could not be answered. The server log has the details." in page
+
+
+def test_a_channel_split_shows_a_grain_warning_and_the_rows(monkeypatch, tmp_path):
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "demo.db"))
+    monkeypatch.setenv("AUDIT_PATH", str(tmp_path / "audit.db"))
+    monkeypatch.setenv("DB_BACKEND", "sqlite")
+    monkeypatch.setenv("KNOWLEDGE_PATH", str(tmp_path / "knowledge"))
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "local")
+
+    at = AppTest.from_file(str(ROOT / "app.py"), default_timeout=60).run(timeout=60)
+    at = _sign_in(at, "analyst", "analyst")
+    at.chat_input[0].set_value("Show revenue broken out by channels").run(timeout=60)
+    page = _blob(at)
+    assert "outside the additive" in page
+    assert "channel" in page
+    assert at.dataframe
+    assert "channel" in list(at.dataframe[0].value.columns)

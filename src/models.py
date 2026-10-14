@@ -47,3 +47,4 @@ class Answer:
     audit_saved: bool = True
     knowledge_snippets: list[str] = field(default_factory=list)
     metric_id: str | None = None
+    grain_warning: str | None = None

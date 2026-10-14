@@ -9,6 +9,7 @@ from dataclasses import replace
 from src.audit import AuditEvent, AuditLog
 from src.config import Settings, redact
 from src.db.sqlite import QueryExecutionError
+from src.grain import grain_warning
 from src.knowledge.store import KnowledgeStore
 from src.llm import LlmClient, LlmError, parse_model_output
 from src.local_sql import PlannerError, plan_sql
@@ -135,6 +136,7 @@ def _dump_answer(answer: Answer) -> str:
             "summary": answer.summary,
             "knowledge_snippets": list(answer.knowledge_snippets),
             "metric_id": answer.metric_id,
+            "grain_warning": answer.grain_warning,
         }
     )
 
@@ -163,6 +165,7 @@ def _load_answer(payload: str) -> Answer | None:
         summary=data.get("summary"),
         knowledge_snippets=list(data.get("knowledge_snippets") or []),
         metric_id=data.get("metric_id") if isinstance(data.get("metric_id"), str) else None,
+        grain_warning=data.get("grain_warning") if isinstance(data.get("grain_warning"), str) else None,
     )
 
 
@@ -221,6 +224,10 @@ def answer_question(
             digest = definition_hash(selected)
             if answer.metric_id is None:
                 answer.metric_id = selected.id
+            if answer.sql:
+                answer.grain_warning = grain_warning(
+                    answer.sql, selected, dialect=getattr(adapter, "dialect", "sqlite")
+                )
         saved = _record(
             audit,
             user,

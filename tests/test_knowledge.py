@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 
 import pytest
 
-from src.knowledge.chunk import chunk_document
+from src.knowledge.chunk import CHUNK_SIZE, chunk_document
 from src.knowledge.store import KnowledgeError, KnowledgeStore
 from src.pipeline import answer_question
 from src.prompt import build_messages
@@ -316,6 +317,24 @@ def test_index_written_before_scoping_is_migrated_and_hidden(env):
     refreshed = store.reindex(adopted.id, username="growth", role="growth")
     assert refreshed.owner == "growth"
     assert store.search("revenue by product", role="growth")[0].filename == "legacy.md"
+
+
+def test_csv_and_json_chunks_stay_within_the_size_cap():
+    cell = "x" * 200
+    lines = ["col"]
+    while len("\n".join(lines)) < 5000:
+        lines.append(cell)
+    csv_text = "\n".join(lines) + "\n"
+    assert len(csv_text) >= 5000
+    csv_chunks, _ = chunk_document(csv_text, "csv")
+    assert csv_chunks
+    assert all(len(chunk) <= CHUNK_SIZE for chunk in csv_chunks)
+
+    payload = json.dumps({"note": "y" * 3000})
+    assert len(payload) >= 3000
+    json_chunks, _ = chunk_document(payload, "json")
+    assert json_chunks
+    assert all(len(chunk) <= CHUNK_SIZE for chunk in json_chunks)
 
 
 def test_uploading_the_same_bytes_twice_is_rejected(env):

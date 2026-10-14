@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import replace
 
 from src.audit import AuditEvent, AuditLog
 from src.config import Settings, redact
 from src.db.sqlite import QueryExecutionError
+from src.grain import grain_warning
 from src.knowledge.store import KnowledgeStore
 from src.llm import LlmClient, LlmError, parse_model_output
 from src.local_sql import PlannerError, plan_sql
+from src.metrics import active_metrics, definition_hash, load_metrics, match_metrics
 from src.models import Answer, TableSchema, User
 from src.present import local_summary
 from src.prompt import build_messages, build_summary_messages
@@ -81,6 +84,8 @@ def _record(
     row_count: int | None,
     error: str | None,
     settings: Settings,
+    metric_id: str | None = None,
+    definition_digest: str | None = None,
 ) -> bool:
     try:
         audit.write(
@@ -93,6 +98,8 @@ def _record(
                 status=status,
                 row_count=row_count,
                 error=redact(error, settings.openrouter_api_key, settings.db_password) if error else None,
+                metric_id=metric_id,
+                definition_hash=definition_digest,
             )
         )
         return True
@@ -114,6 +121,54 @@ def _blocked_message(reason: str) -> str:
     return "The query was blocked by the read-only SQL check."
 
 
+def _dump_answer(answer: Answer) -> str:
+    return json.dumps(
+        {
+            "status": answer.status,
+            "message": answer.message,
+            "sql": answer.sql,
+            "columns": list(answer.columns),
+            "rows": answer.rows,
+            "tables": list(answer.tables),
+            "assumptions": answer.assumptions,
+            "source": answer.source,
+            "truncated": answer.truncated,
+            "summary": answer.summary,
+            "knowledge_snippets": list(answer.knowledge_snippets),
+            "metric_id": answer.metric_id,
+            "grain_warning": answer.grain_warning,
+        }
+    )
+
+
+def _load_answer(payload: str) -> Answer | None:
+    try:
+        data = json.loads(payload)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    status = data.get("status")
+    message = data.get("message")
+    if not isinstance(status, str) or not isinstance(message, str):
+        return None
+    return Answer(
+        status=status,
+        message=message,
+        sql=data.get("sql"),
+        columns=list(data.get("columns") or []),
+        rows=list(data.get("rows") or []),
+        tables=list(data.get("tables") or []),
+        assumptions=data.get("assumptions"),
+        source=data.get("source"),
+        truncated=bool(data.get("truncated")),
+        summary=data.get("summary"),
+        knowledge_snippets=list(data.get("knowledge_snippets") or []),
+        metric_id=data.get("metric_id") if isinstance(data.get("metric_id"), str) else None,
+        grain_warning=data.get("grain_warning") if isinstance(data.get("grain_warning"), str) else None,
+    )
+
+
 def _maybe_summary(
     llm: LlmClient,
     question: str,
@@ -121,9 +176,17 @@ def _maybe_summary(
     rows: list[dict],
     assumptions: str | None,
     source: str,
+    audit: AuditLog,
+    settings: Settings,
 ) -> str:
     summary = local_summary(columns, rows)
     if source != "openrouter" or not llm.configured or len(rows) < _SUMMARY_ROW_THRESHOLD:
+        return summary
+    try:
+        if audit.llm_calls_today() >= settings.max_llm_calls_per_day:
+            return summary
+        audit.record_llm_call()
+    except sqlite3.Error:
         return summary
     try:
         text = llm.complete(build_summary_messages(question, columns, rows, assumptions)).strip()
@@ -151,8 +214,20 @@ def answer_question(
     text = text[:_MAX_QUESTION_CHARS]
     allowed = set(user.allowed_tables)
     route = route_question(text, catalog)
+    selected = None
 
     def finish(answer: Answer, error: str | None = None) -> Answer:
+        metric_id = answer.metric_id
+        digest = None
+        if selected is not None:
+            metric_id = selected.id
+            digest = definition_hash(selected)
+            if answer.metric_id is None:
+                answer.metric_id = selected.id
+            if answer.sql:
+                answer.grain_warning = grain_warning(
+                    answer.sql, selected, dialect=getattr(adapter, "dialect", "sqlite")
+                )
         saved = _record(
             audit,
             user,
@@ -163,11 +238,18 @@ def answer_question(
             len(answer.rows) if answer.status == "ok" else None,
             error,
             settings,
+            metric_id=metric_id,
+            definition_digest=digest,
         )
         answer.audit_saved = saved
         if not saved:
             note = "The usage log could not be written."
             answer.message = f"{answer.message} {note}".strip()
+        if answer.status == "ok" and answer.source == "openrouter":
+            try:
+                audit.remember_answer(text, user.role, _dump_answer(answer))
+            except (sqlite3.Error, TypeError, ValueError):
+                pass
         return answer
 
     if not route.matched:
@@ -198,6 +280,30 @@ def answer_question(
         return finish(Answer(status="clarify", message=message, tables=permitted))
 
     table = permitted[0]
+    catalogue = load_metrics(settings.metrics_path)
+    matched = [metric for metric in match_metrics(text, catalogue) if metric.table == table]
+    if len(matched) != 1:
+        role_titles = [metric.title for metric in active_metrics(catalogue) if metric.table in allowed]
+        if not matched:
+            message = (
+                f"I need a metric before I can answer. "
+                f"Your role can use {_join(role_titles)}. Name one of them."
+            )
+        else:
+            message = (
+                f"That question matches {_join([metric.title for metric in matched])}. "
+                "Pick one metric. I will not choose for you."
+            )
+        return finish(Answer(status="clarify", message=message, tables=[table]))
+    selected = matched[0]
+    try:
+        cached_payload = audit.cached_answer(text, user.role)
+    except sqlite3.Error:
+        cached_payload = None
+    cached = _load_answer(cached_payload) if cached_payload else None
+    if cached is not None and cached.tables == [table]:
+        return finish(cached)
+
     schemas = _schemas(adapter, [table], catalog)
     if isinstance(schemas, str):
         return finish(Answer(status="error", message=schemas, tables=[table]))
@@ -206,30 +312,41 @@ def answer_question(
     assumptions = ""
     sql = ""
     llm_error: str | None = None
+    over_cap = False
     notes: list[str] = []
     if llm.configured:
-        if knowledge is not None:
-            try:
-                notes = knowledge.prompt_notes(text, role=user.role)
-            except Exception:
-                notes = []
         try:
-            raw = llm.complete(
-                build_messages(
-                    text,
-                    schemas,
-                    dialect=adapter.dialect,
-                    knowledge_notes=notes or None,
+            over_cap = audit.llm_calls_today() >= settings.max_llm_calls_per_day
+        except sqlite3.Error:
+            over_cap = False
+        if not over_cap:
+            if knowledge is not None:
+                try:
+                    notes = knowledge.prompt_notes(text, role=user.role)
+                except Exception:
+                    notes = []
+            try:
+                try:
+                    audit.record_llm_call()
+                except sqlite3.Error:
+                    pass
+                raw = llm.complete(
+                    build_messages(
+                        text,
+                        schemas,
+                        dialect=adapter.dialect,
+                        knowledge_notes=notes or None,
+                        metric=selected,
+                    )
                 )
-            )
-            sql, assumptions = parse_model_output(raw)
-            source = "openrouter"
-            if notes:
-                assumptions = f"{assumptions} Knowledge base notes were added to the prompt.".strip()
-        except LlmError as exc:
-            llm_error = str(exc)
-            sql = ""
-            notes = []
+                sql, assumptions = parse_model_output(raw)
+                source = "openrouter"
+                if notes:
+                    assumptions = f"{assumptions} Knowledge base notes were added to the prompt.".strip()
+            except LlmError as exc:
+                llm_error = str(exc)
+                sql = ""
+                notes = []
     if not sql:
         if source == "openrouter" and llm_error is None:
             message = assumptions or _clarify(catalog, allowed)
@@ -245,6 +362,11 @@ def answer_question(
             assumptions = (
                 f"{assumptions} The language model request failed, so this SQL came from the local planner."
             )
+        elif over_cap:
+            assumptions = (
+                f"{assumptions} The daily language-model call limit was reached, "
+                "so this SQL came from the local planner."
+            ).strip()
 
     verdict = check_sql(sql, {table}, dialect=adapter.dialect)
     if not verdict.ok:
@@ -282,7 +404,7 @@ def answer_question(
 
     rows = [dict(row) for row in result.rows]
     columns = list(result.columns)
-    summary = _maybe_summary(llm, text, columns, rows, assumptions, source)
+    summary = _maybe_summary(llm, text, columns, rows, assumptions, source, audit, settings)
     return finish(
         Answer(
             status="ok",

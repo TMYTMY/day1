@@ -3,6 +3,10 @@
 Revenue grain: event_date × product × region × channel.
 DAU grain: event_date × platform × country. Countries partition a platform's
 users. The RNG seed is fixed so local results stay stable.
+
+The revenue load also plants five deterministic defects so the demo is not a
+perfect table: duplicate grain rows, a late backfill, NULL channels, an
+EMEA → E.U. rename, and a stretch of EUR amounts stored in revenue_usd.
 """
 
 from __future__ import annotations
@@ -12,7 +16,18 @@ import sqlite3
 from datetime import date, timedelta
 from pathlib import Path
 
-SEED_VERSION = "1"
+SEED_VERSION = "2"
+# Harbor has no August rows in the daily load. They arrive later as one batch.
+_BACKFILL_START = date(2026, 8, 1)
+_BACKFILL_END = date(2026, 8, 31)
+_BACKFILL_LOADED_AT = "2026-09-18"
+# After this date the EMEA region code was renamed in the source system.
+_REGION_RENAME_ON = date(2026, 9, 1)
+# EUR list prices written into revenue_usd with no FX conversion.
+_EUR_START = date(2026, 10, 1)
+_EUR_END = date(2026, 10, 7)
+_EUR_LIST_FACTOR = 1.10
+_DUPLICATE_DATES = frozenset({"2026-06-15", "2026-06-16", "2026-06-17"})
 START = date(2026, 6, 15)
 END = date(2026, 10, 12)
 LAUNCH = date(2026, 9, 8)
@@ -66,7 +81,40 @@ def _revenue_rows(rng: random.Random) -> list[tuple]:
                     revenue = round(value, 2)
                     orders = max(1, int(round(revenue / order_value[channel])))
                     rows.append((day.isoformat(), product, region, channel, revenue, orders))
-    return rows
+    return _apply_revenue_defects(rows)
+
+
+def _apply_revenue_defects(rows: list[tuple]) -> list[tuple]:
+    """Return revenue rows plus the five fixed defects. No extra randomness."""
+    daily: list[tuple] = []
+    held_for_backfill: list[tuple] = []
+    for event_date, product, region, channel, revenue, orders in rows:
+        day = date.fromisoformat(event_date)
+        ingest_batch = "daily"
+        loaded_at = event_date
+        currency = "USD"
+        if region == "EMEA" and day >= _REGION_RENAME_ON:
+            region = "E.U."
+        if product == "Harbor" and channel == "partner" and day < date(2026, 7, 1):
+            channel = None
+        if _EUR_START <= day <= _EUR_END:
+            revenue = round(revenue * _EUR_LIST_FACTOR, 2)
+            currency = "EUR"
+        record = (event_date, product, region, channel, revenue, orders, ingest_batch, loaded_at, currency)
+        if product == "Harbor" and _BACKFILL_START <= day <= _BACKFILL_END:
+            held_for_backfill.append(record)
+        else:
+            daily.append(record)
+    duplicates = [
+        row
+        for row in daily
+        if row[0] in _DUPLICATE_DATES and row[1] == "Atlas" and row[2] == "AMER" and row[3] == "direct"
+    ]
+    backfill = [
+        (event_date, product, region, channel, revenue, orders, "backfill", _BACKFILL_LOADED_AT, currency)
+        for event_date, product, region, channel, revenue, orders, _batch, _loaded, currency in held_for_backfill
+    ]
+    return daily + duplicates + backfill
 
 
 def _dau_rows(rng: random.Random) -> list[tuple]:
@@ -106,9 +154,12 @@ def rebuild(path: Path) -> None:
                 event_date TEXT NOT NULL,
                 product TEXT NOT NULL,
                 region TEXT NOT NULL,
-                channel TEXT NOT NULL,
+                channel TEXT,
                 revenue_usd REAL NOT NULL,
-                orders INTEGER NOT NULL
+                orders INTEGER NOT NULL,
+                ingest_batch TEXT NOT NULL,
+                loaded_at TEXT NOT NULL,
+                amount_currency TEXT NOT NULL
             );
             CREATE TABLE dau (
                 event_date TEXT NOT NULL,
@@ -126,7 +177,12 @@ def rebuild(path: Path) -> None:
             """
         )
         conn.executemany(
-            "INSERT INTO revenue VALUES (?, ?, ?, ?, ?, ?)",
+            """
+            INSERT INTO revenue (
+                event_date, product, region, channel, revenue_usd, orders,
+                ingest_batch, loaded_at, amount_currency
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
             _revenue_rows(rng),
         )
         conn.executemany(

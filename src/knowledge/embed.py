@@ -10,7 +10,10 @@ from __future__ import annotations
 
 import hashlib
 import re
+import time
 from collections.abc import Callable
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 
 import numpy as np
 import requests
@@ -42,6 +45,11 @@ _STOP = {
 }
 
 PostFunc = Callable[..., requests.Response]
+CacheGet = Callable[[str], np.ndarray | None]
+CachePut = Callable[[str, np.ndarray], None]
+
+# One try plus three retries. Sleep 1s, then 2s, then 4s unless Retry-After says otherwise.
+_RETRY_BACKOFF_SECONDS = (1, 2, 4)
 
 
 def _tokens(text: str) -> list[str]:
@@ -77,10 +85,37 @@ def _normalize(matrix: np.ndarray) -> np.ndarray:
     return matrix / norms
 
 
+def _retry_delay(response: requests.Response, fallback: float) -> float:
+    """Prefer a numeric or HTTP-date Retry-After header over the backoff."""
+    headers = getattr(response, "headers", None)
+    raw = headers.get("Retry-After") if headers is not None and hasattr(headers, "get") else None
+    if raw is None or raw == "":
+        return fallback
+    try:
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        pass
+    try:
+        when = parsedate_to_datetime(str(raw))
+    except (TypeError, ValueError, IndexError, OverflowError):
+        return fallback
+    if when is None:
+        return fallback
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return max(0.0, (when - datetime.now(timezone.utc)).total_seconds())
+
+
 class Embedder:
     def __init__(self, settings: Settings, post: PostFunc | None = None):
         self.settings = settings
         self._post = post or requests.post
+        self._cache_get: CacheGet | None = None
+        self._cache_put: CachePut | None = None
+
+    def bind_cache(self, reader: CacheGet, writer: CachePut) -> None:
+        self._cache_get = reader
+        self._cache_put = writer
 
     @property
     def provider(self) -> str:
@@ -115,24 +150,34 @@ class Embedder:
             "Content-Type": "application/json",
             "X-Title": "Fieldnote",
         }
+        resolved: list[np.ndarray | None] = [None] * len(texts)
+        missing: list[int] = []
+        for index, text in enumerate(texts):
+            cached = self._cache_get(text) if self._cache_get is not None else None
+            if cached is None:
+                missing.append(index)
+            else:
+                resolved[index] = cached
+        if missing:
+            fetched = self._fetch_embeddings(url, headers, key, [texts[index] for index in missing])
+            for index, vector in zip(missing, fetched):
+                resolved[index] = vector
+                if self._cache_put is not None:
+                    self._cache_put(texts[index], vector)
+        return np.vstack(resolved)
+
+    def _fetch_embeddings(
+        self,
+        url: str,
+        headers: dict[str, str],
+        key: str,
+        texts: list[str],
+    ) -> list[np.ndarray]:
         vectors: list[list[float]] = []
         try:
             for start in range(0, len(texts), 32):
                 batch = texts[start : start + 32]
-                response = self._post(
-                    url,
-                    headers=headers,
-                    json={"model": self.settings.embedding_model, "input": batch},
-                    timeout=45,
-                )
-                if response.status_code != 200:
-                    body = (response.text or "")[:300]
-                    raise KnowledgeEmbedError(
-                        redact(
-                            f"Embedding request returned HTTP {response.status_code}: {body}",
-                            key,
-                        )
-                    )
+                response = self._post_with_retry(url, headers, key, batch)
                 payload = response.json()
                 ordered = sorted(payload["data"], key=lambda item: item.get("index", 0))
                 vectors.extend(item["embedding"] for item in ordered)
@@ -145,7 +190,37 @@ class Embedder:
         matrix = np.asarray(vectors, dtype=np.float32)
         if matrix.ndim != 2 or matrix.shape[0] != len(texts):
             raise KnowledgeEmbedError("Embedding response had an unexpected shape.")
-        return _normalize(matrix)
+        normalized = _normalize(matrix)
+        return [normalized[row].copy() for row in range(normalized.shape[0])]
+
+    def _post_with_retry(
+        self,
+        url: str,
+        headers: dict[str, str],
+        key: str,
+        batch: list[str],
+    ) -> requests.Response:
+        attempts = 1 + len(_RETRY_BACKOFF_SECONDS)
+        for attempt in range(attempts):
+            response = self._post(
+                url,
+                headers=headers,
+                json={"model": self.settings.embedding_model, "input": batch},
+                timeout=45,
+            )
+            if response.status_code == 200:
+                return response
+            retryable = response.status_code == 429 or 500 <= response.status_code <= 599
+            if not retryable or attempt == attempts - 1:
+                body = (response.text or "")[:300]
+                raise KnowledgeEmbedError(
+                    redact(
+                        f"Embedding request returned HTTP {response.status_code}: {body}",
+                        key,
+                    )
+                )
+            time.sleep(_retry_delay(response, _RETRY_BACKOFF_SECONDS[attempt]))
+        raise KnowledgeEmbedError("Embedding request failed.")
 
 
 class KnowledgeEmbedError(Exception):

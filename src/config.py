@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -45,6 +45,8 @@ class Settings:
     embedding_provider: str
     embedding_model: str
     embedding_api_key: str | None
+    max_llm_calls_per_day: int = 500
+    metrics_path: Path = field(default_factory=lambda: ROOT / "config" / "metrics.yaml")
 
     def __repr__(self) -> str:
         key_state = "set" if self.openrouter_api_key else "unset"
@@ -90,6 +92,12 @@ def load_settings() -> Settings:
     embedding_key = _optional("EMBEDDING_API_KEY")
     if embedding_provider == "openrouter" and not embedding_key:
         embedding_key = _optional("OPENROUTER_API_KEY")
+    try:
+        max_llm_calls_per_day = int(os.environ.get("MAX_LLM_CALLS_PER_DAY", "500"))
+    except ValueError as exc:
+        raise ConfigError("MAX_LLM_CALLS_PER_DAY must be an integer.") from exc
+    if max_llm_calls_per_day < 0:
+        raise ConfigError("MAX_LLM_CALLS_PER_DAY must be zero or greater.")
     return Settings(
         db_backend=backend,
         db_path=_resolve(os.environ.get("DB_PATH", ""), "data/demo.db"),
@@ -116,4 +124,6 @@ def load_settings() -> Settings:
         embedding_model=os.environ.get("EMBEDDING_MODEL", "openai/text-embedding-3-small").strip()
         or "openai/text-embedding-3-small",
         embedding_api_key=embedding_key,
+        max_llm_calls_per_day=max_llm_calls_per_day,
+        metrics_path=_resolve(os.environ.get("METRICS_PATH", ""), "config/metrics.yaml"),
     )

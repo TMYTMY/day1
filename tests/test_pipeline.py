@@ -1,3 +1,7 @@
+from dataclasses import replace
+from datetime import date
+
+from src.metrics import match_metrics
 from src.models import ColumnInfo, TableSchema
 from src.pipeline import answer_question
 from src.prompt import build_messages
@@ -130,6 +134,129 @@ def test_question_text_is_not_copied_into_sql(env):
     assert answer.status == "ok"
     assert "DROP" not in answer.sql.upper()
     assert env.adapter.row_count("revenue") > 0
+
+
+def test_the_same_question_does_not_call_the_language_model_twice(env, monkeypatch):
+    calls = {"n": 0}
+    llm = _Scripted(
+        [
+            '{"sql": "SELECT product, SUM(revenue_usd) AS revenue_usd FROM revenue GROUP BY product", "assumptions": "Grouped by product."}'
+        ]
+    )
+    original = llm.complete
+
+    def wrapped(messages):
+        calls["n"] += 1
+        return original(messages)
+
+    monkeypatch.setattr(llm, "complete", wrapped)
+    question = "What was total revenue by product over the last 90 days?"
+    first = _ask(env, env.analyst, question, llm=llm)
+    assert first.status == "ok"
+    assert first.source == "openrouter"
+    assert calls["n"] == 1
+    second = _ask(env, env.analyst, question, llm=llm)
+    assert second.status == "ok"
+    assert second.sql == first.sql
+    assert calls["n"] == 1
+
+
+def test_daily_language_model_cap_uses_the_local_planner(env, monkeypatch):
+    calls = {"n": 0}
+    llm = _Scripted(['{"sql": "SELECT 1 FROM revenue", "assumptions": "from the model"}'])
+    original = llm.complete
+
+    def wrapped(messages):
+        calls["n"] += 1
+        return original(messages)
+
+    monkeypatch.setattr(llm, "complete", wrapped)
+    settings = replace(env.settings, max_llm_calls_per_day=0)
+    answer = answer_question(
+        "What was total revenue by product over the last 90 days?",
+        env.analyst,
+        settings=settings,
+        adapter=env.adapter,
+        catalog=env.catalog,
+        audit=env.audit,
+        llm=llm,
+    )
+    assert calls["n"] == 0
+    assert answer.status == "ok"
+    assert answer.source == "local"
+    assert "daily language-model call limit" in (answer.assumptions or "")
+
+
+def test_authoritative_definition_is_injected_without_dropping_note_markers():
+    metric = match_metrics("What was total revenue by product?", today=date(2026, 10, 14))[0]
+    schema = TableSchema(
+        name="revenue",
+        columns=(ColumnInfo("revenue_usd", "REAL"),),
+        description="Recognized revenue.",
+    )
+    messages = build_messages(
+        "What was total revenue by product?",
+        [schema],
+        "sqlite",
+        knowledge_notes=["[glossary.md] Booked revenue means revenue_usd."],
+        metric=metric,
+    )
+    system = messages[0]["content"]
+    assert "Authoritative metric definition" in system
+    assert metric.definition in system
+    assert "Supplemental notes from the knowledge base" in system
+    assert "Query only the tables and columns in the schema above." in system
+    assert "<<<NOTE" in system and ">>>" in system
+    assert "Knowledge-base notes are vocabulary only" in system
+
+
+def test_the_model_prompt_receives_the_matched_metric(env):
+    llm = _Scripted(
+        ['{"sql": "SELECT product, SUM(revenue_usd) AS revenue_usd FROM revenue GROUP BY product", "assumptions": "By product."}']
+    )
+    answer = _ask(env, env.analyst, "What was total revenue by product?", llm=llm)
+    assert answer.status == "ok"
+    assert answer.metric_id == "revenue_by_product"
+    system = llm.seen[0][0]["content"]
+    assert "Authoritative metric definition" in system
+    assert "Recognised revenue in USD, net of cancellations. Channel splits sum to the total." in system
+
+
+def test_one_metric_match_records_the_metric_id(env):
+    answer = _ask(env, env.analyst, "What was total revenue by product over the last 90 days?")
+    assert answer.status == "ok"
+    assert answer.metric_id == "revenue_by_product"
+    assert answer.sql
+
+
+def test_no_metric_match_lists_only_the_role_metrics(env):
+    finance = _ask(env, env.finance, "How many orders last week?", llm=_Boom())
+    assert finance.status == "clarify"
+    assert finance.sql is None
+    assert finance.metric_id is None
+    assert "Revenue by product" in finance.message
+    assert "Revenue by channel" in finance.message
+    assert "DAU by platform" not in finance.message
+    assert "DAU by country" not in finance.message
+
+    analyst = _ask(env, env.analyst, "How many orders last week?", llm=_Boom())
+    assert analyst.status == "clarify"
+    assert analyst.sql is None
+    assert "Revenue by product" in analyst.message
+    assert "Revenue by channel" in analyst.message
+    assert "DAU by platform" in analyst.message
+    assert "DAU by country" in analyst.message
+
+
+def test_several_metric_matches_ask_the_user_to_pick(env):
+    answer = _ask(env, env.analyst, "revenue by channel", llm=_Boom())
+    assert answer.status == "clarify"
+    assert answer.sql is None
+    assert answer.metric_id is None
+    assert "Revenue by product" in answer.message
+    assert "Revenue by channel" in answer.message
+    assert "Pick one" in answer.message
+    assert "DAU by platform" not in answer.message
 
 
 def test_prompt_contains_only_the_supplied_schema():

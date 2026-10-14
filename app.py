@@ -32,6 +32,7 @@ PREVIEW_ROWS = 100
 IDLE_TIMEOUT_SECONDS = 1800
 MAX_LOGIN_FAILURES = 5
 LOGIN_WINDOW_SECONDS = 300
+SOURCE_URL = "https://github.com/TMYTMY/steamlit-llm"
 SUGGESTIONS = (
     ("revenue", "What was total revenue by product over the last 90 days?"),
     ("revenue", "Show the daily revenue trend for the last 30 days"),
@@ -110,7 +111,14 @@ def _suggestions_for(tables: tuple[str, ...]) -> list[str]:
     return [label for table, label in SUGGESTIONS if table in allowed][:4]
 
 
+def _source_link() -> None:
+    """AGPL section 13: a network user can reach the source from the sidebar."""
+    st.markdown(f"[Source]({SOURCE_URL})")
+
+
 def _render_login(settings: Settings, audit: AuditLog) -> None:
+    with st.sidebar:
+        _source_link()
     st.markdown('<p class="fn-kicker">Fieldnote</p>', unsafe_allow_html=True)
     st.title("Ask the warehouse")
     st.caption(
@@ -228,6 +236,8 @@ def _chart(frame: pd.DataFrame) -> None:
 
 
 def _render_result(payload: dict) -> None:
+    if payload.get("grain_warning"):
+        st.warning(payload["grain_warning"])
     summary = payload.get("summary") or payload.get("message") or ""
     if summary:
         st.markdown(summary)
@@ -285,6 +295,8 @@ def _render_message(message: dict) -> None:
             st.warning(payload["message"])
         else:
             st.error(payload["message"])
+            if payload.get("grain_warning"):
+                st.warning(payload["grain_warning"])
             if status == "blocked" and payload.get("sql"):
                 with st.expander("Blocked SQL"):
                     st.code(payload["sql"], language="sql")
@@ -309,6 +321,8 @@ def _pack(question: str, answer: Answer, settings: Settings, username: str) -> d
         "username": username,
         "model": settings.openrouter_model,
         "knowledge_snippets": answer.knowledge_snippets,
+        "metric_id": answer.metric_id,
+        "grain_warning": answer.grain_warning,
     }
 
 
@@ -379,6 +393,7 @@ def _sidebar(user: User, settings: Settings, adapter: object, audit: AuditLog) -
                 st.caption(f"{when} · {event['status']} · {question}")
         if st.button("Sign out", key="sign_out", width="stretch"):
             _sign_out()
+        _source_link()
 
 
 def _sign_out() -> None:
@@ -463,6 +478,7 @@ def main() -> None:
             st.caption(f"Role · {user.role}")
             if st.button("Sign out", key="sign_out", width="stretch"):
                 _sign_out()
+            _source_link()
         render_knowledge_page(knowledge, settings, user)
         return
 

@@ -49,6 +49,20 @@ def _chunk_prose(text: str) -> list[str]:
     return chunks
 
 
+def _render_csv(header: list[str], rows: list[list[str]]) -> str:
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(header)
+    writer.writerows(rows)
+    return output.getvalue().strip()
+
+
+def _bounded(text: str) -> list[str]:
+    if len(text) <= CHUNK_SIZE:
+        return [text]
+    return _chunk_prose(text)
+
+
 def _chunk_csv(text: str) -> list[str]:
     reader = csv.reader(io.StringIO(text))
     rows = [row for row in reader if any(cell.strip() for cell in row)]
@@ -62,15 +76,16 @@ def _chunk_csv(text: str) -> list[str]:
     def flush() -> None:
         if not batch:
             return
-        output = io.StringIO()
-        writer = csv.writer(output)
-        writer.writerow(header)
-        writer.writerows(batch)
-        chunks.append(output.getvalue().strip())
+        chunks.extend(_bounded(_render_csv(header, batch)))
 
     for row in body:
+        if batch:
+            size = len(_render_csv(header, batch + [row]))
+            if size >= CHUNK_SIZE or len(batch) >= 20:
+                flush()
+                batch = []
         batch.append(row)
-        if len(batch) >= 20:
+        if len(batch) >= 20 or len(_render_csv(header, batch)) >= CHUNK_SIZE:
             flush()
             batch = []
     flush()
@@ -86,6 +101,13 @@ def _chunk_json(text: str) -> list[str]:
         chunks: list[str] = []
         batch: list[object] = []
         for item in value:
+            rendered_item = json.dumps(item, ensure_ascii=False, indent=2)
+            if len(rendered_item) > CHUNK_SIZE:
+                if batch:
+                    chunks.append(json.dumps(batch, ensure_ascii=False, indent=2))
+                    batch = []
+                chunks.extend(_chunk_prose(rendered_item))
+                continue
             trial = batch + [item]
             rendered = json.dumps(trial, ensure_ascii=False, indent=2)
             if batch and len(rendered) > CHUNK_SIZE:

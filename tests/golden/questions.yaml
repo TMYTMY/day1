@@ -1,0 +1,219 @@
+# Self-labeled questions for the metric matcher.
+# The expected ids record the synonym rules in config/metrics.yaml.
+# They are not a check against a confirmed business definition.
+
+- question: "What was total revenue by product over the last 90 days?"
+  expected_metric_id: revenue_by_product
+  expected_metric_ids: [revenue_by_product]
+  expected_table: revenue
+  role: analyst
+
+- question: "Show sales by product"
+  expected_metric_id: revenue_by_product
+  expected_metric_ids: [revenue_by_product]
+  expected_table: revenue
+  role: finance
+
+- question: "gmv by product last month"
+  expected_metric_id: revenue_by_product
+  expected_metric_ids: [revenue_by_product]
+  expected_table: revenue
+  role: finance
+
+- question: "total income this year"
+  expected_metric_id: revenue_by_product
+  expected_metric_ids: [revenue_by_product]
+  expected_table: revenue
+  role: finance
+
+- question: "bookings by product"
+  expected_metric_id: revenue_by_product
+  expected_metric_ids: [revenue_by_product]
+  expected_table: revenue
+  role: finance
+
+- question: "turnover last quarter"
+  expected_metric_id: revenue_by_product
+  expected_metric_ids: [revenue_by_product]
+  expected_table: revenue
+  role: finance
+
+- question: "revenues by product"
+  expected_metric_id: revenue_by_product
+  expected_metric_ids: [revenue_by_product]
+  expected_table: revenue
+  role: analyst
+
+- question: "What was total revenue?"
+  expected_metric_id: revenue_by_product
+  expected_metric_ids: [revenue_by_product]
+  expected_table: revenue
+  role: analyst
+
+- question: "過去 90 日各產品收入"
+  expected_metric_id: revenue_by_product
+  expected_metric_ids: [revenue_by_product]
+  expected_table: revenue
+  role: analyst
+
+- question: "各產品營收"
+  expected_metric_id: revenue_by_product
+  expected_metric_ids: [revenue_by_product]
+  expected_table: revenue
+  role: finance
+
+- question: "上月營業額"
+  expected_metric_id: revenue_by_product
+  expected_metric_ids: [revenue_by_product]
+  expected_table: revenue
+  role: finance
+
+- question: "今年营业额"
+  expected_metric_id: revenue_by_product
+  expected_metric_ids: [revenue_by_product]
+  expected_table: revenue
+  role: finance
+
+- question: "Show daily active users by platform for the last 30 days"
+  expected_metric_id: dau_by_platform
+  expected_metric_ids: [dau_by_platform]
+  expected_table: dau
+  role: growth
+
+- question: "DAU by platform"
+  expected_metric_id: dau_by_platform
+  expected_metric_ids: [dau_by_platform]
+  expected_table: dau
+  role: growth
+
+- question: "active users last week"
+  expected_metric_id: dau_by_platform
+  expected_metric_ids: [dau_by_platform]
+  expected_table: dau
+  role: analyst
+
+- question: "daily active users yesterday"
+  expected_metric_id: dau_by_platform
+  expected_metric_ids: [dau_by_platform]
+  expected_table: dau
+  role: growth
+
+- question: "最近 30 日各平台日活"
+  expected_metric_id: dau_by_platform
+  expected_metric_ids: [dau_by_platform]
+  expected_table: dau
+  role: growth
+
+- question: "各平台日活躍"
+  expected_metric_id: dau_by_platform
+  expected_metric_ids: [dau_by_platform]
+  expected_table: dau
+  role: growth
+
+- question: "活躍用戶趨勢"
+  expected_metric_id: dau_by_platform
+  expected_metric_ids: [dau_by_platform]
+  expected_table: dau
+  role: analyst
+
+- question: "各平台活跃用户"
+  expected_metric_id: dau_by_platform
+  expected_metric_ids: [dau_by_platform]
+  expected_table: dau
+  role: growth
+
+- question: "revenue by channel"
+  expected_metric_id: null
+  expected_metric_ids: [revenue_by_channel, revenue_by_product]
+  expected_table: revenue
+  role: analyst
+
+- question: "sales per channel"
+  expected_metric_id: null
+  expected_metric_ids: [revenue_by_channel, revenue_by_product]
+  expected_table: revenue
+  role: finance
+
+- question: "收入按渠道"
+  expected_metric_id: null
+  expected_metric_ids: [revenue_by_channel, revenue_by_product]
+  expected_table: revenue
+  role: analyst
+
+- question: "營收渠道"
+  expected_metric_id: null
+  expected_metric_ids: [revenue_by_channel, revenue_by_product]
+  expected_table: revenue
+  role: finance
+
+- question: "income per channel"
+  expected_metric_id: null
+  expected_metric_ids: [revenue_by_channel, revenue_by_product]
+  expected_table: revenue
+  role: finance
+
+- question: "DAU by country"
+  expected_metric_id: null
+  expected_metric_ids: [dau_by_country, dau_by_platform]
+  expected_table: dau
+  role: growth
+
+- question: "日活按國家"
+  expected_metric_id: null
+  expected_metric_ids: [dau_by_country, dau_by_platform]
+  expected_table: dau
+  role: analyst
+
+- question: "daily active users per country"
+  expected_metric_id: null
+  expected_metric_ids: [dau_by_country, dau_by_platform]
+  expected_table: dau
+  role: growth
+
+- question: "日活躍按国家"
+  expected_metric_id: null
+  expected_metric_ids: [dau_by_country, dau_by_platform]
+  expected_table: dau
+  role: growth
+
+- question: "What's the weather in Hong Kong?"
+  expected_metric_id: null
+  expected_metric_ids: []
+  expected_table: null
+  role: analyst
+
+- question: "How many orders last week?"
+  expected_metric_id: null
+  expected_metric_ids: []
+  expected_table: null
+  role: finance
+
+- question: "headcount by team"
+  expected_metric_id: null
+  expected_metric_ids: []
+  expected_table: null
+  role: analyst
+
+- question: "今天天氣怎麼樣"
+  expected_metric_id: null
+  expected_metric_ids: []
+  expected_table: null
+  role: analyst
+
+- question: "庫存還有多少"
+  expected_metric_id: null
+  expected_metric_ids: []
+  expected_table: null
+  role: analyst
+
+- question: "server error rate today"
+  expected_metric_id: null
+  expected_metric_ids: []
+  expected_table: null
+  role: analyst
+
+- question: "How many new users joined yesterday?"
+  expected_metric_id: null
+  expected_metric_ids: []
+  expected_table: null
+  role: growth

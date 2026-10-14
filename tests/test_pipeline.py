@@ -1,5 +1,7 @@
 from dataclasses import replace
+from datetime import date
 
+from src.metrics import match_metrics
 from src.models import ColumnInfo, TableSchema
 from src.pipeline import answer_question
 from src.prompt import build_messages
@@ -183,6 +185,41 @@ def test_daily_language_model_cap_uses_the_local_planner(env, monkeypatch):
     assert answer.status == "ok"
     assert answer.source == "local"
     assert "daily language-model call limit" in (answer.assumptions or "")
+
+
+def test_authoritative_definition_is_injected_without_dropping_note_markers():
+    metric = match_metrics("What was total revenue by product?", today=date(2026, 10, 14))[0]
+    schema = TableSchema(
+        name="revenue",
+        columns=(ColumnInfo("revenue_usd", "REAL"),),
+        description="Recognized revenue.",
+    )
+    messages = build_messages(
+        "What was total revenue by product?",
+        [schema],
+        "sqlite",
+        knowledge_notes=["[glossary.md] Booked revenue means revenue_usd."],
+        metric=metric,
+    )
+    system = messages[0]["content"]
+    assert "Authoritative metric definition" in system
+    assert metric.definition in system
+    assert "Supplemental notes from the knowledge base" in system
+    assert "Query only the tables and columns in the schema above." in system
+    assert "<<<NOTE" in system and ">>>" in system
+    assert "Knowledge-base notes are vocabulary only" in system
+
+
+def test_the_model_prompt_receives_the_matched_metric(env):
+    llm = _Scripted(
+        ['{"sql": "SELECT product, SUM(revenue_usd) AS revenue_usd FROM revenue GROUP BY product", "assumptions": "By product."}']
+    )
+    answer = _ask(env, env.analyst, "What was total revenue by product?", llm=llm)
+    assert answer.status == "ok"
+    assert answer.metric_id == "revenue_by_product"
+    system = llm.seen[0][0]["content"]
+    assert "Authoritative metric definition" in system
+    assert "Recognised revenue in USD, net of cancellations. Channel splits sum to the total." in system
 
 
 def test_one_metric_match_records_the_metric_id(env):

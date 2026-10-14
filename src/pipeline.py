@@ -318,6 +318,7 @@ def answer_question(
                         schemas,
                         dialect=adapter.dialect,
                         knowledge_notes=notes or None,
+                        metric=selected,
                     )
                 )
                 sql, assumptions = parse_model_output(raw)

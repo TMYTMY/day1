@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -46,6 +46,7 @@ class Settings:
     embedding_model: str
     embedding_api_key: str | None
     max_llm_calls_per_day: int = 500
+    metrics_path: Path = field(default_factory=lambda: ROOT / "config" / "metrics.yaml")
 
     def __repr__(self) -> str:
         key_state = "set" if self.openrouter_api_key else "unset"
@@ -124,4 +125,5 @@ def load_settings() -> Settings:
         or "openai/text-embedding-3-small",
         embedding_api_key=embedding_key,
         max_llm_calls_per_day=max_llm_calls_per_day,
+        metrics_path=_resolve(os.environ.get("METRICS_PATH", ""), "config/metrics.yaml"),
     )

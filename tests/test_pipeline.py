@@ -185,6 +185,43 @@ def test_daily_language_model_cap_uses_the_local_planner(env, monkeypatch):
     assert "daily language-model call limit" in (answer.assumptions or "")
 
 
+def test_one_metric_match_records_the_metric_id(env):
+    answer = _ask(env, env.analyst, "What was total revenue by product over the last 90 days?")
+    assert answer.status == "ok"
+    assert answer.metric_id == "revenue_by_product"
+    assert answer.sql
+
+
+def test_no_metric_match_lists_only_the_role_metrics(env):
+    finance = _ask(env, env.finance, "How many orders last week?", llm=_Boom())
+    assert finance.status == "clarify"
+    assert finance.sql is None
+    assert finance.metric_id is None
+    assert "Revenue by product" in finance.message
+    assert "Revenue by channel" in finance.message
+    assert "DAU by platform" not in finance.message
+    assert "DAU by country" not in finance.message
+
+    analyst = _ask(env, env.analyst, "How many orders last week?", llm=_Boom())
+    assert analyst.status == "clarify"
+    assert analyst.sql is None
+    assert "Revenue by product" in analyst.message
+    assert "Revenue by channel" in analyst.message
+    assert "DAU by platform" in analyst.message
+    assert "DAU by country" in analyst.message
+
+
+def test_several_metric_matches_ask_the_user_to_pick(env):
+    answer = _ask(env, env.analyst, "revenue by channel", llm=_Boom())
+    assert answer.status == "clarify"
+    assert answer.sql is None
+    assert answer.metric_id is None
+    assert "Revenue by product" in answer.message
+    assert "Revenue by channel" in answer.message
+    assert "Pick one" in answer.message
+    assert "DAU by platform" not in answer.message
+
+
 def test_prompt_contains_only_the_supplied_schema():
     schema = TableSchema(
         name="revenue",

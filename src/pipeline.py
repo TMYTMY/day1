@@ -12,6 +12,7 @@ from src.db.sqlite import QueryExecutionError
 from src.knowledge.store import KnowledgeStore
 from src.llm import LlmClient, LlmError, parse_model_output
 from src.local_sql import PlannerError, plan_sql
+from src.metrics import active_metrics, load_metrics, match_metrics
 from src.models import Answer, TableSchema, User
 from src.present import local_summary
 from src.prompt import build_messages, build_summary_messages
@@ -129,6 +130,7 @@ def _dump_answer(answer: Answer) -> str:
             "truncated": answer.truncated,
             "summary": answer.summary,
             "knowledge_snippets": list(answer.knowledge_snippets),
+            "metric_id": answer.metric_id,
         }
     )
 
@@ -156,6 +158,7 @@ def _load_answer(payload: str) -> Answer | None:
         truncated=bool(data.get("truncated")),
         summary=data.get("summary"),
         knowledge_snippets=list(data.get("knowledge_snippets") or []),
+        metric_id=data.get("metric_id") if isinstance(data.get("metric_id"), str) else None,
     )
 
 
@@ -204,8 +207,11 @@ def answer_question(
     text = text[:_MAX_QUESTION_CHARS]
     allowed = set(user.allowed_tables)
     route = route_question(text, catalog)
+    selected = None
 
     def finish(answer: Answer, error: str | None = None) -> Answer:
+        if selected is not None and answer.metric_id is None:
+            answer.metric_id = selected.id
         saved = _record(
             audit,
             user,
@@ -256,6 +262,22 @@ def answer_question(
         return finish(Answer(status="clarify", message=message, tables=permitted))
 
     table = permitted[0]
+    catalogue = load_metrics(settings.metrics_path)
+    matched = [metric for metric in match_metrics(text, catalogue) if metric.table == table]
+    if len(matched) != 1:
+        role_titles = [metric.title for metric in active_metrics(catalogue) if metric.table in allowed]
+        if not matched:
+            message = (
+                f"I need a metric before I can answer. "
+                f"Your role can use {_join(role_titles)}. Name one of them."
+            )
+        else:
+            message = (
+                f"That question matches {_join([metric.title for metric in matched])}. "
+                "Pick one metric. I will not choose for you."
+            )
+        return finish(Answer(status="clarify", message=message, tables=[table]))
+    selected = matched[0]
     try:
         cached_payload = audit.cached_answer(text, user.role)
     except sqlite3.Error:

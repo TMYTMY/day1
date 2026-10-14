@@ -1,9 +1,13 @@
-from dataclasses import replace
+import sqlite3
+from dataclasses import fields, replace
 from datetime import date
 
-from src.metrics import match_metrics
-from src.models import ColumnInfo, TableSchema
-from src.pipeline import answer_question
+import yaml
+
+from src.config import ROOT
+from src.metrics import definition_hash, load_metrics, match_metrics
+from src.models import Answer, ColumnInfo, TableSchema
+from src.pipeline import _dump_answer, _load_answer, answer_question
 from src.prompt import build_messages
 from src.sql_guard import check_sql
 
@@ -257,6 +261,165 @@ def test_several_metric_matches_ask_the_user_to_pick(env):
     assert "Revenue by channel" in answer.message
     assert "Pick one" in answer.message
     assert "DAU by platform" not in answer.message
+
+
+_ANSWER_SAMPLES = {
+    "status": "ok",
+    "message": "cached-message",
+    "sql": "SELECT 1 /* gen1 */",
+    "columns": ["product"],
+    "rows": [{"product": "Atlas", "revenue_usd": 3}],
+    "tables": ["revenue"],
+    "assumptions": "grouped by product",
+    "source": "openrouter",
+    "truncated": True,
+    "summary": "cached-summary",
+    "audit_saved": False,
+    "knowledge_snippets": ["[glossary.md] booked revenue"],
+    "metric_id": "revenue_by_product",
+    "grain_warning": "channel is outside the additive dimensions",
+}
+
+
+def test_answer_dump_and_load_round_trip_every_field():
+    names = {item.name for item in fields(Answer)}
+    assert names == set(_ANSWER_SAMPLES)
+    blank = Answer(status="status-default", message="message-default")
+    for name, sample in _ANSWER_SAMPLES.items():
+        if name in {"status", "message"}:
+            continue
+        assert getattr(blank, name) != sample
+    original = Answer(**_ANSWER_SAMPLES)
+    restored = _load_answer(_dump_answer(original))
+    assert restored == original
+
+
+def test_an_empty_metric_window_does_not_talk_about_tables(env, tmp_path):
+    entry = {
+        "id": "revenue_future",
+        "title": "Revenue by product",
+        "synonyms": ["revenue"],
+        "table": "revenue",
+        "grain": ["event_date", "product"],
+        "additive_over": ["event_date", "product"],
+        "definition": "Future definition.",
+        "owner": "placeholder",
+        "effective_from": "2099-01-01",
+        "supersedes": None,
+        "exceptions": "",
+    }
+    path = tmp_path / "metrics.yaml"
+    path.write_text(yaml.safe_dump([entry], sort_keys=False), encoding="utf-8")
+    settings = replace(env.settings, metrics_path=path)
+    answer = answer_question(
+        "How many orders last week?",
+        env.analyst,
+        settings=settings,
+        adapter=env.adapter,
+        catalog=env.catalog,
+        audit=env.audit,
+        llm=_Boom(),
+    )
+    assert answer.status == "clarify"
+    assert answer.sql is None
+    assert answer.message == "I need a metric before I can answer. Your role has no active metric."
+
+
+def _audit_rows(path):
+    conn = sqlite3.connect(path)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT sql, metric_id, definition_hash FROM audit_events ORDER BY id ASC"
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def test_a_definition_change_misses_the_answer_cache(env, tmp_path):
+    source = (ROOT / "config" / "metrics.yaml").read_text(encoding="utf-8")
+    path = tmp_path / "metrics.yaml"
+    path.write_text(source, encoding="utf-8")
+    settings = replace(env.settings, metrics_path=path)
+    question = "What was total revenue by product over the last 90 days?"
+    llm = _Scripted(
+        [
+            '{"sql": "SELECT product, SUM(revenue_usd) AS revenue_usd FROM revenue GROUP BY product /* gen1 */", "assumptions": "Grouped by product."}',
+            '{"sql": "SELECT product, SUM(revenue_usd) AS revenue_usd FROM revenue GROUP BY product /* gen2 */", "assumptions": "Confirmed definition."}',
+        ]
+    )
+    first = answer_question(
+        question,
+        env.analyst,
+        settings=settings,
+        adapter=env.adapter,
+        catalog=env.catalog,
+        audit=env.audit,
+        llm=llm,
+    )
+    assert first.status == "ok"
+    assert first.sql is not None and "gen1" in first.sql
+    assert len(llm.seen) == 1
+    v1 = definition_hash(next(item for item in load_metrics(path) if item.id == "revenue_by_product"))
+
+    confirmed = "Recognised revenue in USD after the business confirmation."
+    updated = source.replace(
+        "Recognised revenue in USD, net of cancellations. Channel splits sum to the total.",
+        confirmed,
+    )
+    assert updated != source
+    path.write_text(updated, encoding="utf-8")
+    v2 = definition_hash(next(item for item in load_metrics(path) if item.id == "revenue_by_product"))
+    assert v1 != v2
+
+    second = answer_question(
+        question,
+        env.analyst,
+        settings=settings,
+        adapter=env.adapter,
+        catalog=env.catalog,
+        audit=env.audit,
+        llm=llm,
+    )
+    assert second.status == "ok"
+    assert second.sql is not None and "gen2" in second.sql
+    assert "gen1" not in second.sql
+    assert len(llm.seen) == 2
+    rows = _audit_rows(env.audit.path)
+    assert len(rows) == 2
+    assert rows[0]["sql"] is not None and "gen1" in rows[0]["sql"]
+    assert rows[0]["definition_hash"] == v1
+    assert rows[1]["sql"] is not None and "gen2" in rows[1]["sql"]
+    assert rows[1]["definition_hash"] == v2
+    assert rows[1]["metric_id"] == "revenue_by_product"
+
+
+def test_a_cached_answer_for_another_metric_is_not_reused(env):
+    question = "What was total revenue by product over the last 90 days?"
+    metric = next(item for item in load_metrics(env.settings.metrics_path) if item.id == "revenue_by_product")
+    stale = _dump_answer(
+        Answer(
+            status="ok",
+            message="stale",
+            sql="SELECT product FROM revenue /* stale */",
+            columns=["product"],
+            rows=[{"product": "Atlas"}],
+            tables=["revenue"],
+            source="openrouter",
+            metric_id="not_the_selected_metric",
+        )
+    )
+    env.audit.remember_answer(question, env.analyst.role, metric.id, definition_hash(metric), stale)
+    llm = _Scripted(
+        [
+            '{"sql": "SELECT product, SUM(revenue_usd) AS revenue_usd FROM revenue GROUP BY product /* fresh */", "assumptions": "fresh"}'
+        ]
+    )
+    answer = _ask(env, env.analyst, question, llm=llm)
+    assert answer.status == "ok"
+    assert answer.sql is not None and "fresh" in answer.sql
+    assert "stale" not in answer.sql
+    assert len(llm.seen) == 1
+    assert answer.metric_id == "revenue_by_product"
 
 
 def test_prompt_contains_only_the_supplied_schema():

@@ -13,6 +13,49 @@ def _stamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+_CACHE_KEY = ("question", "role", "metric_id", "definition_hash")
+
+
+def _create_answer_cache(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS answer_cache (
+            question TEXT NOT NULL,
+            role TEXT NOT NULL,
+            metric_id TEXT NOT NULL,
+            definition_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            PRIMARY KEY (question, role, metric_id, definition_hash)
+        )
+        """
+    )
+
+
+def _ensure_answer_cache(conn: sqlite3.Connection) -> None:
+    """Key cached answers by question, role, metric, and definition hash.
+
+    A cache row from before that key is dropped. Serving it would let a later
+    definition inherit SQL that was generated for an older one.
+    """
+    present = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'answer_cache'"
+    ).fetchone()
+    if present is None:
+        _create_answer_cache(conn)
+        return
+    columns = list(conn.execute("PRAGMA table_info(answer_cache)"))
+    key = [
+        column["name"]
+        for column in sorted(columns, key=lambda column: column["pk"])
+        if column["pk"]
+    ]
+    if key == list(_CACHE_KEY):
+        return
+    conn.execute("DROP TABLE answer_cache")
+    _create_answer_cache(conn)
+
+
 def _ensure_metric_columns(conn: sqlite3.Connection) -> None:
     """Add trace columns on databases created before the metric catalogue."""
     present = {row["name"] for row in conn.execute("PRAGMA table_info(audit_events)")}
@@ -73,17 +116,7 @@ class AuditLog:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_login_attempts ON login_attempts(username, id)"
             )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS answer_cache (
-                    question TEXT NOT NULL,
-                    role TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    payload TEXT NOT NULL,
-                    PRIMARY KEY (question, role)
-                )
-                """
-            )
+            _ensure_answer_cache(conn)
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS llm_calls (
@@ -170,38 +203,55 @@ class AuditLog:
             ).fetchone()
         return int(row["failures"])
 
-    def cached_answer(self, question: str, role: str) -> str | None:
-        """Return a cached answer payload for this question and role, if it is under 24 hours old."""
+    def cached_answer(
+        self, question: str, role: str, metric_id: str, definition_hash: str
+    ) -> str | None:
+        """Return a cached payload for this question, role, metric, and definition.
+
+        The row must be under 24 hours old. A different definition hash is a miss.
+        """
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%SZ")
         with self._session() as conn:
             row = conn.execute(
                 """
                 SELECT payload, created_at FROM answer_cache
-                WHERE question = ? AND role = ?
+                WHERE question = ? AND role = ? AND metric_id = ? AND definition_hash = ?
                 """,
-                (question, role),
+                (question, role, metric_id, definition_hash),
             ).fetchone()
             if row is None:
                 return None
             if row["created_at"] < cutoff:
                 conn.execute(
-                    "DELETE FROM answer_cache WHERE question = ? AND role = ?",
-                    (question, role),
+                    """
+                    DELETE FROM answer_cache
+                    WHERE question = ? AND role = ? AND metric_id = ? AND definition_hash = ?
+                    """,
+                    (question, role, metric_id, definition_hash),
                 )
                 return None
             return str(row["payload"])
 
-    def remember_answer(self, question: str, role: str, payload: str) -> None:
+    def remember_answer(
+        self,
+        question: str,
+        role: str,
+        metric_id: str,
+        definition_hash: str,
+        payload: str,
+    ) -> None:
         with self._session() as conn:
             conn.execute(
                 """
-                INSERT INTO answer_cache (question, role, created_at, payload)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(question, role) DO UPDATE SET
+                INSERT INTO answer_cache (
+                    question, role, metric_id, definition_hash, created_at, payload
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(question, role, metric_id, definition_hash) DO UPDATE SET
                     created_at = excluded.created_at,
                     payload = excluded.payload
                 """,
-                (question, role, _stamp(), payload),
+                (question, role, metric_id, definition_hash, _stamp(), payload),
             )
 
     def llm_calls_today(self) -> int:

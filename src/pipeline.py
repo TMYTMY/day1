@@ -137,6 +137,7 @@ def _dump_answer(answer: Answer) -> str:
             "knowledge_snippets": list(answer.knowledge_snippets),
             "metric_id": answer.metric_id,
             "grain_warning": answer.grain_warning,
+            "audit_saved": answer.audit_saved,
         }
     )
 
@@ -166,6 +167,7 @@ def _load_answer(payload: str) -> Answer | None:
         knowledge_snippets=list(data.get("knowledge_snippets") or []),
         metric_id=data.get("metric_id") if isinstance(data.get("metric_id"), str) else None,
         grain_warning=data.get("grain_warning") if isinstance(data.get("grain_warning"), str) else None,
+        audit_saved=data.get("audit_saved") if isinstance(data.get("audit_saved"), bool) else True,
     )
 
 
@@ -245,9 +247,14 @@ def answer_question(
         if not saved:
             note = "The usage log could not be written."
             answer.message = f"{answer.message} {note}".strip()
-        if answer.status == "ok" and answer.source == "openrouter":
+        if (
+            answer.status == "ok"
+            and answer.source == "openrouter"
+            and selected is not None
+            and digest
+        ):
             try:
-                audit.remember_answer(text, user.role, _dump_answer(answer))
+                audit.remember_answer(text, user.role, selected.id, digest, _dump_answer(answer))
             except (sqlite3.Error, TypeError, ValueError):
                 pass
         return answer
@@ -285,10 +292,13 @@ def answer_question(
     if len(matched) != 1:
         role_titles = [metric.title for metric in active_metrics(catalogue) if metric.table in allowed]
         if not matched:
-            message = (
-                f"I need a metric before I can answer. "
-                f"Your role can use {_join(role_titles)}. Name one of them."
-            )
+            if role_titles:
+                message = (
+                    f"I need a metric before I can answer. "
+                    f"Your role can use {_join(role_titles)}. Name one of them."
+                )
+            else:
+                message = "I need a metric before I can answer. Your role has no active metric."
         else:
             message = (
                 f"That question matches {_join([metric.title for metric in matched])}. "
@@ -296,12 +306,13 @@ def answer_question(
             )
         return finish(Answer(status="clarify", message=message, tables=[table]))
     selected = matched[0]
+    definition_digest = definition_hash(selected)
     try:
-        cached_payload = audit.cached_answer(text, user.role)
+        cached_payload = audit.cached_answer(text, user.role, selected.id, definition_digest)
     except sqlite3.Error:
         cached_payload = None
     cached = _load_answer(cached_payload) if cached_payload else None
-    if cached is not None and cached.tables == [table]:
+    if cached is not None and cached.tables == [table] and cached.metric_id == selected.id:
         return finish(cached)
 
     schemas = _schemas(adapter, [table], catalog)

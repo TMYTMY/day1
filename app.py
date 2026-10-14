@@ -9,7 +9,7 @@ import pandas as pd
 import streamlit as st
 
 from src.audit import AuditLog
-from src.auth import authenticate, demo_accounts
+from src.auth import authenticate
 from src.config import ConfigError, Settings, load_settings, redact
 from src.db.factory import build_adapter
 from src.export import ExportMeta, result_filename, stamp_now, to_csv, to_html
@@ -118,13 +118,11 @@ def _render_login(settings: Settings) -> None:
             st.rerun()
     with right:
         st.markdown("**Demo accounts**")
-        st.caption("A local stand-in for SSO. Replace src/auth.py before using real data.")
-        lines = ["| Username | Password | Role | Tables |", "| --- | --- | --- | --- |"]
-        for row in demo_accounts(settings.users_path):
-            lines.append(
-                f"| {row['username']} | {row['password']} | {row['role']} | {row['tables']} |"
-            )
-        st.markdown("\n".join(lines))
+        st.caption(
+            "Demo accounts are listed in README.md. This screen is a local stand-in "
+            "for SSO — replace authenticate() in src/auth.py before pointing the app "
+            "at real data."
+        )
 
 
 def _source_caption(payload: dict) -> str:

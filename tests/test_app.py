@@ -114,3 +114,17 @@ def test_finance_dau_question_stays_on_the_permission_message(monkeypatch, tmp_p
     assert "outside the finance role" in page
     assert at.dataframe == []
     assert at.download_button == []
+
+
+def test_login_page_does_not_render_the_demo_passwords(monkeypatch, tmp_path):
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "demo.db"))
+    monkeypatch.setenv("AUDIT_PATH", str(tmp_path / "audit.db"))
+    monkeypatch.setenv("DB_BACKEND", "sqlite")
+    monkeypatch.setenv("KNOWLEDGE_PATH", str(tmp_path / "knowledge"))
+
+    at = AppTest.from_file(str(ROOT / "app.py"), default_timeout=60).run(timeout=60)
+    page = _blob(at)
+    assert "| analyst | analyst |" not in page
+    assert "| password |" not in page.lower()
+    assert "listed in README.md" in page

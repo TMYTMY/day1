@@ -226,3 +226,7 @@ pytest
 ```
 
 The tests cover routing, the role map, the SELECT allowlist, blocked writes, CSV/HTML export, the revenue, DAU, unknown-topic, and permission paths, and the knowledge base (upload, search, delete, and notes that do not replace routing).
+
+## Copyright
+
+Copyright (C) 2026 CHAN YUI CHI. This program is free software under the GNU Affero General Public License v3.0. The full text is in `LICENSE`. The sidebar Source link points at the repository so a network user can get the source.

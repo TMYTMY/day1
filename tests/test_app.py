@@ -39,6 +39,8 @@ def test_analyst_can_ask_export_and_get_a_clarifying_question(monkeypatch, tmp_p
     assert at.button(key="login_submit") is not None
     at = _sign_in(at, "analyst", "analyst")
     assert at.session_state["user"]["role"] == "analyst"
+    sidebar = "\n".join(element.value for element in at.sidebar.markdown)
+    assert "[Source](https://github.com/TMYTMY/steamlit-llm)" in sidebar
 
     at.button(key="suggest_0").click().run(timeout=60)
     revenue_frame = at.dataframe[0].value
@@ -72,6 +74,8 @@ def test_knowledge_base_page_indexes_and_deletes_a_glossary(monkeypatch, tmp_pat
     at = AppTest.from_file(str(ROOT / "app.py"), default_timeout=60).run(timeout=60)
     at = _sign_in(at, "analyst", "analyst")
     at.sidebar.radio(key="nav_page").set_value("knowledge").run(timeout=60)
+    knowledge_sidebar = "\n".join(element.value for element in at.sidebar.markdown)
+    assert "[Source](https://github.com/TMYTMY/steamlit-llm)" in knowledge_sidebar
     assert any(element.value == "知識庫" for element in at.title)
     assert "No documents yet" in _blob(at)
 

@@ -89,6 +89,45 @@ def test_a_superseded_metric_is_not_matched(tmp_path):
     assert [metric.id for metric in later] == ["revenue_old"]
 
 
+def test_a_dangling_supersede_is_rejected(tmp_path):
+    path = _write(
+        tmp_path,
+        [{**_TEMPLATE, "id": "revenue_old", "supersedes": "missing_metric"}],
+    )
+    with pytest.raises(ConfigError, match="not in the catalogue"):
+        load_metrics(path)
+
+
+def test_a_supersede_cycle_is_rejected(tmp_path):
+    path = _write(
+        tmp_path,
+        [
+            {**_TEMPLATE, "id": "revenue_a", "supersedes": "revenue_b"},
+            {**_TEMPLATE, "id": "revenue_b", "supersedes": "revenue_a"},
+        ],
+    )
+    with pytest.raises(ConfigError, match="cycle"):
+        load_metrics(path)
+
+
+def test_a_cross_table_supersede_is_rejected(tmp_path):
+    path = _write(
+        tmp_path,
+        [
+            {**_TEMPLATE, "id": "revenue_old", "table": "revenue"},
+            {
+                **_TEMPLATE,
+                "id": "dau_new",
+                "table": "dau",
+                "synonyms": ["dau"],
+                "supersedes": "revenue_old",
+            },
+        ],
+    )
+    with pytest.raises(ConfigError, match="cannot supersede"):
+        load_metrics(path)
+
+
 def test_definition_hash_is_stable_and_twelve_hex_characters():
     metric = next(item for item in load_metrics(CATALOGUE) if item.id == "revenue_by_product")
     digest = definition_hash(metric)

@@ -70,6 +70,41 @@ def test_an_old_audit_database_gains_the_metric_columns(tmp_path):
     assert row["definition_hash"] == "def456def456"
 
 
+def test_the_answer_cache_misses_when_the_definition_hash_changes(tmp_path):
+    log = AuditLog(tmp_path / "audit.db")
+    log.remember_answer("q", "analyst", "revenue_by_product", "hashv1", "payload-v1")
+    assert log.cached_answer("q", "analyst", "revenue_by_product", "hashv1") == "payload-v1"
+    assert log.cached_answer("q", "analyst", "revenue_by_product", "hashv2") is None
+    assert log.cached_answer("q", "analyst", "other_metric", "hashv1") is None
+
+
+def test_a_legacy_answer_cache_is_not_reused(tmp_path):
+    path = tmp_path / "legacy.db"
+    conn = sqlite3.connect(path)
+    conn.execute(
+        """
+        CREATE TABLE answer_cache (
+            question TEXT NOT NULL,
+            role TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            PRIMARY KEY (question, role)
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO answer_cache (question, role, created_at, payload) VALUES (?, ?, ?, ?)",
+        ("q", "analyst", "2099-01-01T00:00:00Z", '{"status": "ok", "message": "stale"}'),
+    )
+    conn.commit()
+    conn.close()
+
+    log = AuditLog(path)
+    assert log.cached_answer("q", "analyst", "revenue_by_product", "hashv1") is None
+    log.remember_answer("q", "analyst", "revenue_by_product", "hashv1", "fresh")
+    assert log.cached_answer("q", "analyst", "revenue_by_product", "hashv1") == "fresh"
+
+
 def test_a_successful_answer_stores_the_definition_hash(env):
     metric = next(item for item in load_metrics(env.settings.metrics_path) if item.id == "revenue_by_product")
     answer = answer_question(

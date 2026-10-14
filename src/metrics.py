@@ -55,6 +55,7 @@ def load_metrics(path: Path | None = None) -> list[Metric]:
     seen: set[str] = set()
     for entry in raw:
         metrics.append(_parse(entry, seen))
+    _validate_supersedes(metrics)
     return metrics
 
 
@@ -122,10 +123,40 @@ def _as_date(value: object) -> date:
     raise ConfigError("Metric field effective_from must be a date.")
 
 
+def _validate_supersedes(metrics: list[Metric]) -> None:
+    """Reject dangling targets, cross-table links, and cycles. Dates are not involved."""
+    by_id = {metric.id: metric for metric in metrics}
+    for metric in metrics:
+        if metric.supersedes is None:
+            continue
+        target = by_id.get(metric.supersedes)
+        if target is None:
+            raise ConfigError(
+                f"Metric {metric.id} supersedes {metric.supersedes}, which is not in the catalogue."
+            )
+        if target.table != metric.table:
+            raise ConfigError(
+                f"Metric {metric.id} ({metric.table}) cannot supersede {target.id} ({target.table})."
+            )
+    for start in metrics:
+        seen: list[str] = []
+        current = start
+        while current.supersedes is not None:
+            if current.id in seen:
+                loop = seen[seen.index(current.id) :] + [current.id]
+                raise ConfigError(f"Metric supersede cycle: {' -> '.join(loop)}.")
+            seen.append(current.id)
+            current = by_id[current.supersedes]
+
+
 def active_metrics(metrics: list[Metric], today: date | None = None) -> list[Metric]:
-    """Metrics whose effective date has arrived and that no other metric replaces."""
+    """Metrics whose effective date has arrived and that no already-effective metric replaces."""
     current = today or date.today()
-    replaced = {metric.supersedes for metric in metrics if metric.supersedes}
+    replaced = {
+        metric.supersedes
+        for metric in metrics
+        if metric.supersedes and metric.effective_from <= current
+    }
     chosen = [
         metric
         for metric in metrics

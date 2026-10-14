@@ -6,16 +6,18 @@ import streamlit as st
 
 from src.config import Settings
 from src.knowledge.store import KnowledgeDocument, KnowledgeError, KnowledgeStore
+from src.models import User
 
 
-def render_knowledge_page(store: KnowledgeStore, settings: Settings) -> None:
+def render_knowledge_page(store: KnowledgeStore, settings: Settings, user: User) -> None:
     notice = st.session_state.pop("kb_notice", None)
     st.markdown('<p class="fn-kicker">Knowledge Base</p>', unsafe_allow_html=True)
     st.title("知識庫")
     st.caption(
         "Drop schema docs, DDL, a business glossary, or a synonym list. "
         "The routing map still chooses the table. Matching notes are added to the "
-        "language-model prompt when it writes SQL."
+        "language-model prompt when it writes SQL. Files are scoped to your role, "
+        "and only the uploader can delete or re-index a file."
     )
     if notice:
         st.success(notice)
@@ -31,10 +33,16 @@ def render_knowledge_page(store: KnowledgeStore, settings: Settings) -> None:
         key="kb_upload",
         help="CSV, SQL, DDL, Markdown, text, or JSON. Files stay on this machine.",
     )
-    _consume_uploads(store, uploads or [])
-    documents = store.list_documents()
+    _consume_uploads(store, uploads or [], user)
+    documents = store.list_documents(role=user.role)
     current_embedding = store.embedder.embedding_id
     _metrics(store, documents)
+    legacy = [document for document in documents if document.legacy]
+    if legacy:
+        st.warning(
+            f"{len(legacy)} file(s) were indexed before files were scoped to a role "
+            "and are hidden from answers. Re-index one to attach it to your role."
+        )
     if not documents:
         st.info("No documents yet. A glossary or DDL file will show up here after it is indexed.")
         return
@@ -47,16 +55,22 @@ def render_knowledge_page(store: KnowledgeStore, settings: Settings) -> None:
                 st.caption(
                     f"{document.extension.upper()} · {document.chunk_count} chunks · Updated {when}"
                 )
+                if document.legacy:
+                    st.caption("Unowned · re-index to attach it to your role.")
+                else:
+                    st.caption(f"Uploaded by {document.owner or 'unknown'} ({document.owner_role})")
                 if document.truncated:
                     st.caption("Indexed the first 200 chunks.")
                 if document.embedding_id != current_embedding:
                     st.caption("Re-index this file so it matches the current embedding provider.")
                 left, right = st.columns(2)
                 if left.button("Re-index", key=f"reindex-{document.id}", width="stretch"):
-                    _reindex(store, document.id)
-                if right.button("Delete", key=f"delete-{document.id}", width="stretch"):
-                    store.delete(document.id)
-                    st.rerun()
+                    _reindex(store, document.id, user)
+                if document.legacy or document.owner == user.username:
+                    if right.button("Delete", key=f"delete-{document.id}", width="stretch"):
+                        _delete(store, document.id, user)
+                else:
+                    right.caption("Only the uploader can delete.")
 
 
 def _metrics(store: KnowledgeStore, documents: list[KnowledgeDocument]) -> None:
@@ -67,7 +81,7 @@ def _metrics(store: KnowledgeStore, documents: list[KnowledgeDocument]) -> None:
     third.metric("Embeddings", store.embedder.label())
 
 
-def _consume_uploads(store: KnowledgeStore, uploads: list) -> None:
+def _consume_uploads(store: KnowledgeStore, uploads: list, user: User) -> None:
     seen: list[str] = st.session_state.setdefault("kb_seen_ids", [])
     notices: list[str] = []
     for uploaded in uploads:
@@ -75,7 +89,12 @@ def _consume_uploads(store: KnowledgeStore, uploads: list) -> None:
         if file_id in seen:
             continue
         try:
-            document = store.add_document(uploaded.name, uploaded.getvalue())
+            document = store.add_document(
+                uploaded.name,
+                uploaded.getvalue(),
+                owner=user.username,
+                owner_role=user.role,
+            )
         except KnowledgeError as exc:
             st.error(f"{uploaded.name}: {exc}")
             continue
@@ -87,11 +106,20 @@ def _consume_uploads(store: KnowledgeStore, uploads: list) -> None:
             st.success(notice)
 
 
-def _reindex(store: KnowledgeStore, document_id: str) -> None:
+def _reindex(store: KnowledgeStore, document_id: str, user: User) -> None:
     try:
-        document = store.reindex(document_id)
+        document = store.reindex(document_id, username=user.username, role=user.role)
     except KnowledgeError as exc:
         st.error(str(exc))
         return
     st.session_state.kb_notice = f"Re-indexed {document.filename} · {document.chunk_count} chunks."
+    st.rerun()
+
+
+def _delete(store: KnowledgeStore, document_id: str, user: User) -> None:
+    try:
+        store.delete(document_id, username=user.username)
+    except KnowledgeError as exc:
+        st.error(str(exc))
+        return
     st.rerun()

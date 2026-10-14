@@ -3,6 +3,12 @@
 Chunks and their vectors live in SQLite under data/knowledge/. Search is
 cosine similarity in NumPy. The warehouse database is never opened here, and
 uploaded SQL is stored as text only.
+
+Documents carry the role that uploaded them. Search, prompt notes and the
+listing are scoped to that role, and only the uploader may delete or re-index
+a file. Rows written before this scoping existed have an empty owner_role: they
+stay visible in the listing so someone can adopt them, but they are excluded
+from search and from prompt notes until re-indexed.
 """
 
 from __future__ import annotations
@@ -26,6 +32,17 @@ MAX_BYTES = 2_000_000
 SCORE_MIN = 0.18
 _LOCKS: dict[str, threading.Lock] = {}
 
+# Viewer-scoping columns, added to indexes written by earlier builds.
+_DOCUMENT_COLUMNS = (
+    ("owner", "TEXT NOT NULL DEFAULT ''"),
+    ("owner_role", "TEXT NOT NULL DEFAULT ''"),
+)
+
+# Documents are visible to their own role. The sentinel role below is reserved
+# for material an operator deliberately wants every role to read.
+SHARED_ROLE = "shared"
+
+
 
 class KnowledgeError(Exception):
     """A document could not be indexed."""
@@ -42,6 +59,9 @@ class KnowledgeDocument:
     embedding_id: str
     embedding_dim: int
     truncated: bool
+    owner: str = ""
+    owner_role: str = ""
+    legacy: bool = False
 
 
 @dataclass(frozen=True)
@@ -49,6 +69,19 @@ class Snippet:
     filename: str
     text: str
     score: float
+
+
+def _add_missing_columns(conn: sqlite3.Connection) -> None:
+    """Add scoping columns to an index created before per-role access.
+
+    CREATE TABLE IF NOT EXISTS never alters an existing table, so an index
+    written by an earlier build keeps the old shape and every insert fails.
+    Probe the table first, then ALTER only what is missing.
+    """
+    present = {row["name"] for row in conn.execute("PRAGMA table_info(documents)")}
+    for name, spec in _DOCUMENT_COLUMNS:
+        if name not in present:
+            conn.execute(f"ALTER TABLE documents ADD COLUMN {name} {spec}")
 
 
 def _lock_for(path: Path) -> threading.Lock:
@@ -108,6 +141,7 @@ class KnowledgeStore:
                         ON chunks(document_id);
                     """
                 )
+                _add_missing_columns(conn)
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path, timeout=5)
@@ -116,19 +150,33 @@ class KnowledgeStore:
         conn.execute("PRAGMA foreign_keys=ON")
         return conn
 
-    def list_documents(self) -> list[KnowledgeDocument]:
+    def list_documents(self, *, role: str) -> list[KnowledgeDocument]:
+        """List the documents this role may see.
+
+        Unclaimed rows (empty owner_role) are listed as legacy so an operator
+        can adopt them with re-index; they are not searchable.
+        """
         with self._lock, self._connect() as conn:
             rows = conn.execute(
                 """
                 SELECT id, filename, extension, byte_size, chunk_count, updated_at,
-                       embedding_id, embedding_dim, truncated
+                       embedding_id, embedding_dim, truncated, owner, owner_role
                 FROM documents
+                WHERE owner_role = ? OR owner_role = ? OR owner_role = ''
                 ORDER BY updated_at DESC, filename ASC
-                """
+                """,
+                (role, SHARED_ROLE),
             ).fetchall()
         return [_document(row) for row in rows]
 
-    def add_document(self, filename: str, data: bytes) -> KnowledgeDocument:
+    def add_document(
+        self,
+        filename: str,
+        data: bytes,
+        *,
+        owner: str,
+        owner_role: str,
+    ) -> KnowledgeDocument:
         safe_name = Path(filename).name
         if not safe_name or safe_name in {".", ".."}:
             raise KnowledgeError("The file needs a name.")
@@ -148,24 +196,48 @@ class KnowledgeStore:
             content_hash=hashlib.sha256(data).hexdigest(),
             body=text,
             updated_at=_now(),
+            owner=owner,
+            owner_role=owner_role,
         )
 
-    def delete(self, document_id: str) -> None:
+    def delete(self, document_id: str, *, username: str) -> None:
         with self._lock, self._connect() as conn:
+            row = conn.execute(
+                "SELECT owner, owner_role FROM documents WHERE id = ?",
+                (document_id,),
+            ).fetchone()
+            if row is None:
+                raise KnowledgeError("That document is no longer in the knowledge base.")
+            if row["owner_role"] and row["owner"] != username:
+                raise KnowledgeError("You can only delete files that you uploaded.")
             conn.execute("DELETE FROM chunks WHERE document_id = ?", (document_id,))
             conn.execute("DELETE FROM documents WHERE id = ?", (document_id,))
 
-    def reindex(self, document_id: str) -> KnowledgeDocument:
+    def reindex(self, document_id: str, *, username: str, role: str) -> KnowledgeDocument:
+        """Rebuild one document with the current embedder.
+
+        A row with no owner_role was indexed before scoping existed; re-indexing
+        adopts it for the caller instead of failing, which is the only way such
+        a row becomes searchable again.
+        """
         with self._lock, self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT id, filename, extension, byte_size, content_hash, body
+                SELECT id, filename, extension, byte_size, content_hash, body,
+                       owner, owner_role
                 FROM documents WHERE id = ?
                 """,
                 (document_id,),
             ).fetchone()
         if row is None:
             raise KnowledgeError("That document is no longer in the knowledge base.")
+        owner = row["owner"] or ""
+        owner_role = row["owner_role"] or ""
+        if owner_role:
+            if owner != username:
+                raise KnowledgeError("You can only re-index files that you uploaded.")
+        else:
+            owner, owner_role = username, role
         return self._write_document(
             document_id=row["id"],
             filename=row["filename"],
@@ -174,9 +246,11 @@ class KnowledgeStore:
             content_hash=row["content_hash"],
             body=row["body"],
             updated_at=_now(),
+            owner=owner,
+            owner_role=owner_role,
         )
 
-    def search(self, query: str, limit: int = 4) -> list[Snippet]:
+    def search(self, query: str, *, role: str, limit: int = 4) -> list[Snippet]:
         query = (query or "").strip()
         if not query:
             return []
@@ -196,8 +270,10 @@ class KnowledgeStore:
                 JOIN documents ON documents.id = chunks.document_id
                 WHERE documents.embedding_id = ?
                   AND documents.embedding_dim = ?
+                  AND documents.owner_role != ''
+                  AND (documents.owner_role = ? OR documents.owner_role = ?)
                 """,
-                (embedding_id, int(query_vector.shape[0])),
+                (embedding_id, int(query_vector.shape[0]), role, SHARED_ROLE),
             ).fetchall()
         if not rows:
             return []
@@ -224,8 +300,11 @@ class KnowledgeStore:
                 break
         return snippets
 
-    def prompt_notes(self, query: str, limit: int = 4) -> list[str]:
-        return [f"[{snippet.filename}] {snippet.text}" for snippet in self.search(query, limit=limit)]
+    def prompt_notes(self, query: str, *, role: str, limit: int = 4) -> list[str]:
+        return [
+            f"[{snippet.filename}] {snippet.text}"
+            for snippet in self.search(query, role=role, limit=limit)
+        ]
 
     def _write_document(
         self,
@@ -237,6 +316,8 @@ class KnowledgeStore:
         content_hash: str,
         body: str,
         updated_at: str,
+        owner: str,
+        owner_role: str,
     ) -> KnowledgeDocument:
         chunks, truncated = chunk_document(body, extension)
         if not chunks:
@@ -255,8 +336,9 @@ class KnowledgeStore:
                 """
                 INSERT INTO documents (
                     id, filename, extension, byte_size, chunk_count, updated_at,
-                    content_hash, embedding_id, embedding_dim, truncated, body
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    content_hash, embedding_id, embedding_dim, truncated, body,
+                    owner, owner_role
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     filename = excluded.filename,
                     extension = excluded.extension,
@@ -267,7 +349,9 @@ class KnowledgeStore:
                     embedding_id = excluded.embedding_id,
                     embedding_dim = excluded.embedding_dim,
                     truncated = excluded.truncated,
-                    body = excluded.body
+                    body = excluded.body,
+                    owner = excluded.owner,
+                    owner_role = excluded.owner_role
                 """,
                 (
                     document_id,
@@ -281,6 +365,8 @@ class KnowledgeStore:
                     embedding_dim,
                     int(truncated),
                     body,
+                    owner,
+                    owner_role,
                 ),
             )
             conn.executemany(
@@ -303,10 +389,13 @@ class KnowledgeStore:
             embedding_id=embedding_id,
             embedding_dim=embedding_dim,
             truncated=truncated,
+            owner=owner,
+            owner_role=owner_role,
         )
 
 
 def _document(row: sqlite3.Row) -> KnowledgeDocument:
+    owner = row["owner"] or ""
     return KnowledgeDocument(
         id=row["id"],
         filename=row["filename"],
@@ -317,4 +406,7 @@ def _document(row: sqlite3.Row) -> KnowledgeDocument:
         embedding_id=row["embedding_id"],
         embedding_dim=row["embedding_dim"],
         truncated=bool(row["truncated"]),
+        owner=owner,
+        owner_role=row["owner_role"] or "",
+        legacy=not (row["owner_role"] or ""),
     )

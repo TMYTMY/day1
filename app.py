@@ -432,7 +432,7 @@ def main() -> None:
             st.caption(f"Role · {user.role}")
             if st.button("Sign out", key="sign_out", width="stretch"):
                 _sign_out()
-        render_knowledge_page(knowledge, settings)
+        render_knowledge_page(knowledge, settings, user)
         return
 
     st.markdown('<p class="fn-kicker">Warehouse Q&A</p>', unsafe_allow_html=True)

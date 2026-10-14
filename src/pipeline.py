@@ -210,7 +210,7 @@ def answer_question(
     if llm.configured:
         if knowledge is not None:
             try:
-                notes = knowledge.prompt_notes(text)
+                notes = knowledge.prompt_notes(text, role=user.role)
             except Exception:
                 notes = []
         try:

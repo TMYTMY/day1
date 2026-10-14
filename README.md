@@ -9,7 +9,7 @@ The demo ships with SQLite tables for revenue and daily active users, so it runs
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements-dev.txt
 python -m streamlit run app.py
 ```
 
@@ -125,6 +125,7 @@ Each question is appended to the audit database with the user, role, tables, SQL
 ## Tests
 
 ```bash
+pip install -r requirements-dev.txt
 pytest
 ```
 

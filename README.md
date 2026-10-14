@@ -21,6 +21,16 @@ Copy `.env.example` to `.env` only if you want to override the defaults. The sam
 python -m src.db.seed
 ```
 
+## Serving it beyond localhost
+
+`.streamlit/config.toml` binds the server to `127.0.0.1` with `enableCORS = true`, so the app answers on this machine only. Do not change `address` to reach another machine on the LAN. Put a reverse proxy in front instead, and keep TLS and access control at the proxy:
+
+```bash
+caddy reverse-proxy --from :8080 --to 127.0.0.1:47221
+```
+
+The proxy terminates TLS and decides who may connect. The app keeps its role check, the SELECT allowlist, and the read-only database connection, but none of those replace transport security or network access control.
+
 ## Sign in
 
 `config/users.yaml` is a stand-in for SSO. `src/auth.py` is the function to replace with the company identity provider. Everyone else in the app only sees a username, a role, and the tables that role may use.

@@ -82,19 +82,3 @@ def authenticate(username: str, password: str, path: Path) -> User | None:
         role=account.role,
         allowed_tables=directory.roles[account.role],
     )
-
-
-def demo_accounts(path: Path) -> list[dict[str, str]]:
-    directory = load_directory(path)
-    rows = []
-    for account in directory.accounts.values():
-        tables = ", ".join(directory.roles[account.role])
-        rows.append(
-            {
-                "username": account.username,
-                "password": account.password,
-                "role": account.role,
-                "tables": tables,
-            }
-        )
-    return rows

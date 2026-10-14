@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 from src.config import ROOT
 from streamlit.testing.v1 import AppTest
 
@@ -114,3 +116,100 @@ def test_finance_dau_question_stays_on_the_permission_message(monkeypatch, tmp_p
     assert "outside the finance role" in page
     assert at.dataframe == []
     assert at.download_button == []
+
+
+def test_login_page_does_not_render_the_demo_passwords(monkeypatch, tmp_path):
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "demo.db"))
+    monkeypatch.setenv("AUDIT_PATH", str(tmp_path / "audit.db"))
+    monkeypatch.setenv("DB_BACKEND", "sqlite")
+    monkeypatch.setenv("KNOWLEDGE_PATH", str(tmp_path / "knowledge"))
+
+    at = AppTest.from_file(str(ROOT / "app.py"), default_timeout=60).run(timeout=60)
+    page = _blob(at)
+    assert "| analyst | analyst |" not in page
+    assert "| password |" not in page.lower()
+    assert "listed in README.md" in page
+
+
+def test_login_locks_out_after_five_failed_attempts(monkeypatch, tmp_path):
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "demo.db"))
+    monkeypatch.setenv("AUDIT_PATH", str(tmp_path / "audit.db"))
+    monkeypatch.setenv("DB_BACKEND", "sqlite")
+    monkeypatch.setenv("KNOWLEDGE_PATH", str(tmp_path / "knowledge"))
+
+    import src.auth as auth_module
+
+    calls = {"n": 0}
+    original = auth_module.authenticate
+
+    def counting(username, password, path):
+        calls["n"] += 1
+        return original(username, password, path)
+
+    monkeypatch.setattr("src.auth.authenticate", counting)
+    at = AppTest.from_file(str(ROOT / "app.py"), default_timeout=60).run(timeout=60)
+    for _ in range(5):
+        at.text_input(key="login_user").set_value("analyst")
+        at.text_input(key="login_password").set_value("not-the-password")
+        at = at.button(key="login_submit").click().run(timeout=60)
+    assert calls["n"] == 5
+    assert "did not match" in _blob(at)
+    assert at.session_state.get("user") is None
+
+    at.text_input(key="login_user").set_value("analyst")
+    at.text_input(key="login_password").set_value("analyst")
+    at = at.button(key="login_submit").click().run(timeout=60)
+    assert calls["n"] == 5
+    assert at.session_state.get("user") is None
+    assert "Too many failed attempts" in _blob(at)
+
+
+def test_idle_session_is_signed_out_on_the_next_interaction(monkeypatch, tmp_path):
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "demo.db"))
+    monkeypatch.setenv("AUDIT_PATH", str(tmp_path / "audit.db"))
+    monkeypatch.setenv("DB_BACKEND", "sqlite")
+    monkeypatch.setenv("KNOWLEDGE_PATH", str(tmp_path / "knowledge"))
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "local")
+
+    at = AppTest.from_file(str(ROOT / "app.py"), default_timeout=60).run(timeout=60)
+    at = _sign_in(at, "analyst", "analyst")
+    assert at.session_state["user"] is not None
+    seen = at.session_state["last_seen"]
+    assert isinstance(seen, datetime)
+
+    at.session_state["last_seen"] = seen - timedelta(minutes=31)
+    at = at.run(timeout=60)
+    assert at.session_state.get("user") is None
+    assert "login_submit" in [button.key for button in at.button]
+
+
+def test_the_idle_window_is_thirty_minutes():
+    import app as app_module
+
+    assert app_module.IDLE_TIMEOUT_SECONDS == 1800
+    assert app_module._session_expired(None) is False
+    assert app_module._session_expired(datetime.now(timezone.utc) - timedelta(seconds=1799)) is False
+    assert app_module._session_expired(datetime.now(timezone.utc) - timedelta(seconds=1801)) is True
+
+
+def test_a_failed_answer_shows_a_fixed_message_and_not_the_exception(monkeypatch, tmp_path):
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "demo.db"))
+    monkeypatch.setenv("AUDIT_PATH", str(tmp_path / "audit.db"))
+    monkeypatch.setenv("DB_BACKEND", "sqlite")
+    monkeypatch.setenv("KNOWLEDGE_PATH", str(tmp_path / "knowledge"))
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "local")
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("secret path /etc/passwd")
+
+    monkeypatch.setattr("src.pipeline.answer_question", boom)
+    at = AppTest.from_file(str(ROOT / "app.py"), default_timeout=60).run(timeout=60)
+    at = _sign_in(at, "analyst", "analyst")
+    at.chat_input[0].set_value("What was total revenue by product?").run(timeout=60)
+    page = _blob(at)
+    assert "/etc/passwd" not in page
+    assert "The question could not be answered. The server log has the details." in page

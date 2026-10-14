@@ -1,16 +1,21 @@
-"""Fieldnote chat UI."""
+"""Fieldnote chat UI.
+
+Session expiry is evaluated on user interaction only. Streamlit is request
+driven, so an idle browser tab keeps its server-side session until the next event.
+"""
 
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from uuid import uuid4
 
 import pandas as pd
 import streamlit as st
 
 from src.audit import AuditLog
-from src.auth import authenticate, demo_accounts
-from src.config import ConfigError, Settings, load_settings, redact
+from src.auth import authenticate
+from src.config import ConfigError, Settings, load_settings
 from src.db.factory import build_adapter
 from src.export import ExportMeta, result_filename, stamp_now, to_csv, to_html
 from src.knowledge.page import render_knowledge_page
@@ -24,6 +29,9 @@ from src.routing import Catalog, load_catalog
 logger = logging.getLogger("fieldnote")
 
 PREVIEW_ROWS = 100
+IDLE_TIMEOUT_SECONDS = 1800
+MAX_LOGIN_FAILURES = 5
+LOGIN_WINDOW_SECONDS = 300
 SUGGESTIONS = (
     ("revenue", "What was total revenue by product over the last 90 days?"),
     ("revenue", "Show the daily revenue trend for the last 30 days"),
@@ -64,6 +72,22 @@ def _init_state() -> None:
     st.session_state.setdefault("user", None)
     st.session_state.setdefault("messages", [])
     st.session_state.setdefault("last_result", None)
+    st.session_state.setdefault("last_seen", None)
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _session_expired(last_seen: datetime | None) -> bool:
+    """True when the signed-in session has been idle past the timeout.
+
+    Streamlit only runs this on an event, so a tab left open keeps its
+    server-side session until the next interaction.
+    """
+    if last_seen is None:
+        return False
+    return (_now() - last_seen).total_seconds() > IDLE_TIMEOUT_SECONDS
 
 
 def _queue_suggestion(label: str) -> None:
@@ -86,7 +110,7 @@ def _suggestions_for(tables: tuple[str, ...]) -> list[str]:
     return [label for table, label in SUGGESTIONS if table in allowed][:4]
 
 
-def _render_login(settings: Settings) -> None:
+def _render_login(settings: Settings, audit: AuditLog) -> None:
     st.markdown('<p class="fn-kicker">Fieldnote</p>', unsafe_allow_html=True)
     st.title("Ask the warehouse")
     st.caption(
@@ -100,11 +124,16 @@ def _render_login(settings: Settings) -> None:
             password = st.text_input("Password", type="password", key="login_password")
             submitted = st.form_submit_button("Sign in", key="login_submit", width="stretch")
         if submitted:
+            candidate = (username or "").strip()
+            if audit.recent_failures(candidate, LOGIN_WINDOW_SECONDS) >= MAX_LOGIN_FAILURES:
+                st.error("Too many failed attempts. Try again in a few minutes.")
+                return
             try:
-                user = authenticate(username, password, settings.users_path)
+                user = authenticate(candidate, password, settings.users_path)
             except ConfigError as exc:
                 st.error(str(exc))
                 return
+            audit.record_login(candidate, user is not None)
             if user is None:
                 st.error("That username and password did not match.")
                 return
@@ -115,16 +144,15 @@ def _render_login(settings: Settings) -> None:
             }
             st.session_state.messages = []
             st.session_state.last_result = None
+            st.session_state.last_seen = _now()
             st.rerun()
     with right:
         st.markdown("**Demo accounts**")
-        st.caption("A local stand-in for SSO. Replace src/auth.py before using real data.")
-        lines = ["| Username | Password | Role | Tables |", "| --- | --- | --- | --- |"]
-        for row in demo_accounts(settings.users_path):
-            lines.append(
-                f"| {row['username']} | {row['password']} | {row['role']} | {row['tables']} |"
-            )
-        st.markdown("\n".join(lines))
+        st.caption(
+            "Demo accounts are listed in README.md. This screen is a local stand-in "
+            "for SSO — replace authenticate() in src/auth.py before pointing the app "
+            "at real data."
+        )
 
 
 def _source_caption(payload: dict) -> str:
@@ -305,12 +333,11 @@ def _run_turn(
             llm=llm,
             knowledge=knowledge,
         )
-    except Exception as exc:
-        logger.error("answer failed: %s", type(exc).__name__)
+    except Exception:
+        logger.exception("answer failed")
         answer = Answer(
             status="error",
-            message="The question could not be answered. "
-            + redact(str(exc), settings.openrouter_api_key, settings.db_password),
+            message="The question could not be answered. The server log has the details.",
         )
     payload = _pack(question, answer, settings, user.username)
     st.session_state.messages.append({"id": uuid4().hex[:8], "role": "user", "text": question})
@@ -414,11 +441,15 @@ def main() -> None:
         return
 
     if _session_user() is None:
-        _render_login(settings)
+        _render_login(settings, audit)
         return
 
     user = _session_user()
     assert user is not None
+    if _session_expired(st.session_state.get("last_seen")):
+        _sign_out()
+        return
+    st.session_state.last_seen = _now()
     if settings.db_backend != "sqlite":
         st.warning(
             f"DB_BACKEND={settings.db_backend} is a stub in this build. "
@@ -432,7 +463,7 @@ def main() -> None:
             st.caption(f"Role · {user.role}")
             if st.button("Sign out", key="sign_out", width="stretch"):
                 _sign_out()
-        render_knowledge_page(knowledge, settings)
+        render_knowledge_page(knowledge, settings, user)
         return
 
     st.markdown('<p class="fn-kicker">Warehouse Q&A</p>', unsafe_allow_html=True)

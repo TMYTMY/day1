@@ -47,3 +47,8 @@ NOTICE:
 Requests
 Copyright 2019 Kenneth Reitz
 ```
+
+## openpyxl 3.1.5
+
+- License: MIT
+- Copyright: Copyright (c) 2010 openpyxl

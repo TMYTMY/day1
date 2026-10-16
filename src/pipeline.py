@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Mapping
 from dataclasses import replace
+from pathlib import Path
 
 from src.audit import AuditEvent, AuditLog
 from src.config import Settings, redact
+from src.db.resolve import resolve_table
 from src.db.sqlite import QueryExecutionError
 from src.grain import grain_warning
 from src.knowledge.store import KnowledgeStore
@@ -18,6 +21,12 @@ from src.models import Answer, TableSchema, User
 from src.present import local_summary
 from src.prompt import PROMPT_VERSION, build_messages, build_summary_messages
 from src.routing import Catalog, route_question
+from src.sources import (
+    DEFAULT_SOURCES_DB,
+    SourceSpec,
+    source_status,
+    spec_for_table,
+)
 from src.sql_guard import UnsafeSQLError, check_sql
 
 _SUMMARY_ROW_THRESHOLD = 8
@@ -60,6 +69,33 @@ def _clarify(catalog: Catalog, allowed: set[str]) -> str:
     return f"I can answer questions about {_join(titles)}.{extra}"
 
 
+def _routed_source_id(
+    tables: tuple[str, ...] | list[str],
+    sources: Mapping[str, SourceSpec] | None,
+) -> str | None:
+    """Source id when the route names exactly one declared table. None otherwise."""
+    if not sources:
+        return None
+    found: list[str] = []
+    for table in tables:
+        spec = spec_for_table(sources, table)
+        if spec is not None and spec.source_id not in found:
+            found.append(spec.source_id)
+    if len(found) == 1:
+        return found[0]
+    return None
+
+
+def _source_gap(spec: SourceSpec, status: str) -> str:
+    title = spec.description or spec.table
+    if status == "declared_no_metric":
+        return (
+            f"{title} is declared, but no metric is bound to {spec.table}. "
+            "I need a metric before I can answer."
+        )
+    return f"{spec.table} is not declared, so it cannot be queried."
+
+
 def _schemas(adapter: object, tables: list[str], catalog: Catalog) -> list[TableSchema] | str:
     schemas: list[TableSchema] = []
     for table in tables:
@@ -67,6 +103,8 @@ def _schemas(adapter: object, tables: list[str], catalog: Catalog) -> list[Table
             schema = adapter.get_schema(table)  # type: ignore[attr-defined]
         except NotImplementedError as exc:
             return str(exc)
+        except sqlite3.Error:
+            return f"The routing map points at `{table}`, but that table is not in the database."
         if schema is None:
             return f"The routing map points at `{table}`, but that table is not in the database."
         description = catalog.descriptions.get(table, "")
@@ -86,6 +124,7 @@ def _record(
     settings: Settings,
     metric_id: str | None = None,
     definition_digest: str | None = None,
+    source_id: str | None = None,
 ) -> bool:
     try:
         audit.write(
@@ -100,6 +139,7 @@ def _record(
                 error=redact(error, settings.openrouter_api_key, settings.db_password) if error else None,
                 metric_id=metric_id,
                 definition_hash=definition_digest,
+                source_id=source_id,
             )
         )
         return True
@@ -217,6 +257,8 @@ def answer_question(
     audit: AuditLog,
     llm: LlmClient,
     knowledge: KnowledgeStore | None = None,
+    sources: Mapping[str, SourceSpec] | None = None,
+    sources_db: Path | None = None,
 ) -> Answer:
     text = (question or "").strip()
     if not text:
@@ -225,6 +267,9 @@ def answer_question(
     allowed = set(user.allowed_tables)
     route = route_question(text, catalog)
     selected = None
+    declared: SourceSpec | None = None
+    active = adapter
+    routed_source_id = _routed_source_id(route.tables, sources)
 
     def finish(answer: Answer, error: str | None = None) -> Answer:
         metric_id = answer.metric_id
@@ -236,7 +281,7 @@ def answer_question(
                 answer.metric_id = selected.id
             if answer.sql:
                 answer.grain_warning = grain_warning(
-                    answer.sql, selected, dialect=getattr(adapter, "dialect", "sqlite")
+                    answer.sql, selected, dialect=getattr(active, "dialect", "sqlite")
                 )
         saved = _record(
             audit,
@@ -250,6 +295,7 @@ def answer_question(
             settings,
             metric_id=metric_id,
             definition_digest=digest,
+            source_id=routed_source_id,
         )
         answer.audit_saved = saved
         if not saved:
@@ -303,6 +349,20 @@ def answer_question(
 
     table = permitted[0]
     catalogue = load_metrics(settings.metrics_path)
+    declared = spec_for_table(sources or {}, table)
+    if declared is not None:
+        availability = source_status(declared, catalogue)
+        if availability != "answerable":
+            return finish(
+                Answer(status="clarify", message=_source_gap(declared, availability), tables=[table])
+            )
+        resolved = resolve_table(
+            table,
+            warehouse=adapter,
+            sources=sources or {},
+            sources_path=sources_db or DEFAULT_SOURCES_DB,
+        )
+        active = resolved.adapter
     matched = [metric for metric in match_metrics(text, catalogue) if metric.table == table]
     if len(matched) != 1:
         role_titles = [metric.title for metric in active_metrics(catalogue) if metric.table in allowed]
@@ -336,7 +396,7 @@ def answer_question(
     if cached is not None and cached.tables == [table] and cached.metric_id == selected.id:
         return finish(cached)
 
-    schemas = _schemas(adapter, [table], catalog)
+    schemas = _schemas(active, [table], catalog)
     if isinstance(schemas, str):
         return finish(Answer(status="error", message=schemas, tables=[table]))
 
@@ -366,7 +426,7 @@ def answer_question(
                     build_messages(
                         text,
                         schemas,
-                        dialect=adapter.dialect,
+                        dialect=active.dialect,
                         knowledge_notes=notes or None,
                         metric=selected,
                     )
@@ -384,7 +444,9 @@ def answer_question(
             message = assumptions or _clarify(catalog, allowed)
             return finish(Answer(status="clarify", message=message, tables=[table], assumptions=assumptions or None))
         try:
-            planned = plan_sql(text, table, {column.name for column in schemas[0].columns}, adapter.dialect)
+            if declared is not None:
+                raise PlannerError("LLM configuration is required to answer a declared source.")
+            planned = plan_sql(text, table, {column.name for column in schemas[0].columns}, active.dialect)
         except PlannerError as exc:
             return finish(Answer(status="error", message=str(exc), tables=[table]), error=str(exc))
         sql = planned.sql
@@ -400,7 +462,7 @@ def answer_question(
                 "so this SQL came from the local planner."
             ).strip()
 
-    verdict = check_sql(sql, {table}, dialect=adapter.dialect)
+    verdict = check_sql(sql, {table}, dialect=active.dialect)
     if not verdict.ok:
         return finish(
             Answer(
@@ -415,7 +477,7 @@ def answer_question(
         )
 
     try:
-        result = adapter.execute_select(sql, allowed_tables={table}, max_rows=settings.max_rows)
+        result = active.execute_select(sql, allowed_tables={table}, max_rows=settings.max_rows)
     except UnsafeSQLError as exc:
         return finish(
             Answer(

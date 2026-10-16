@@ -67,6 +67,17 @@ def _ensure_metric_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE audit_events ADD COLUMN definition_hash TEXT")
 
 
+def _ensure_source_column(conn: sqlite3.Connection) -> None:
+    """Add source_id. A failure leaves the old database readable."""
+    present = {row["name"] for row in conn.execute("PRAGMA table_info(audit_events)")}
+    if "source_id" in present:
+        return
+    try:
+        conn.execute("ALTER TABLE audit_events ADD COLUMN source_id TEXT")
+    except sqlite3.Error:
+        return
+
+
 @dataclass(frozen=True)
 class AuditEvent:
     username: str
@@ -79,6 +90,7 @@ class AuditEvent:
     error: str | None
     metric_id: str | None = None
     definition_hash: str | None = None
+    source_id: str | None = None
 
 
 class AuditLog:
@@ -128,6 +140,7 @@ class AuditLog:
                 """
             )
             _ensure_metric_columns(conn)
+            _ensure_source_column(conn)
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path, timeout=5)
@@ -150,8 +163,8 @@ class AuditLog:
                 """
                 INSERT INTO audit_events (
                     ts, username, role, question, routed_tables, sql, status, row_count, error,
-                    metric_id, definition_hash
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    metric_id, definition_hash, source_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     _stamp(),
@@ -165,14 +178,17 @@ class AuditLog:
                     (event.error or "")[:500] or None,
                     (event.metric_id or "")[:200] or None,
                     (event.definition_hash or "")[:64] or None,
+                    (event.source_id or "")[:200] or None,
                 ),
             )
 
     def recent(self, username: str, limit: int = 8) -> list[dict]:
         with self._session() as conn:
+            names = {row["name"] for row in conn.execute("PRAGMA table_info(audit_events)")}
+            source = ", source_id" if "source_id" in names else ""
             rows = conn.execute(
-                """
-                SELECT ts, question, status, routed_tables, row_count
+                f"""
+                SELECT ts, question, status, routed_tables, row_count{source}
                 FROM audit_events
                 WHERE username = ?
                 ORDER BY id DESC

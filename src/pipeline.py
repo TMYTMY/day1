@@ -13,10 +13,10 @@ from src.grain import grain_warning
 from src.knowledge.store import KnowledgeStore
 from src.llm import LlmClient, LlmError, parse_model_output
 from src.local_sql import PlannerError, plan_sql
-from src.metrics import active_metrics, definition_hash, load_metrics, match_metrics
+from src.metrics import Metric, active_metrics, definition_hash, load_metrics, match_metrics, metric_cache_key
 from src.models import Answer, TableSchema, User
 from src.present import local_summary
-from src.prompt import build_messages, build_summary_messages
+from src.prompt import PROMPT_VERSION, build_messages, build_summary_messages
 from src.routing import Catalog, route_question
 from src.sql_guard import UnsafeSQLError, check_sql
 
@@ -119,6 +119,14 @@ def _blocked_message(reason: str) -> str:
     if reason == "parse_error":
         return "The query was blocked because it could not be parsed as read-only SQL."
     return "The query was blocked by the read-only SQL check."
+
+
+def _answer_cache_key(metric: Metric, settings: Settings) -> str:
+    return metric_cache_key(
+        metric,
+        model=settings.openrouter_model,
+        prompt_version=PROMPT_VERSION,
+    )
 
 
 def _dump_answer(answer: Answer) -> str:
@@ -254,7 +262,14 @@ def answer_question(
             and digest
         ):
             try:
-                audit.remember_answer(text, user.role, selected.id, digest, _dump_answer(answer))
+                audit.remember_answer(
+                    text,
+                    user.role,
+                    selected.id,
+                    digest,
+                    _dump_answer(answer),
+                    cache_key=_answer_cache_key(selected, settings),
+                )
             except (sqlite3.Error, TypeError, ValueError):
                 pass
         return answer
@@ -308,7 +323,13 @@ def answer_question(
     selected = matched[0]
     definition_digest = definition_hash(selected)
     try:
-        cached_payload = audit.cached_answer(text, user.role, selected.id, definition_digest)
+        cached_payload = audit.cached_answer(
+            text,
+            user.role,
+            selected.id,
+            definition_digest,
+            cache_key=_answer_cache_key(selected, settings),
+        )
     except sqlite3.Error:
         cached_payload = None
     cached = _load_answer(cached_payload) if cached_payload else None

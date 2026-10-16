@@ -13,7 +13,7 @@ def _stamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-_CACHE_KEY = ("question", "role", "metric_id", "definition_hash")
+_CACHE_KEY = ("question", "role", "metric_id", "cache_key")
 
 
 def _create_answer_cache(conn: sqlite3.Connection) -> None:
@@ -24,19 +24,21 @@ def _create_answer_cache(conn: sqlite3.Connection) -> None:
             role TEXT NOT NULL,
             metric_id TEXT NOT NULL,
             definition_hash TEXT NOT NULL,
+            cache_key TEXT NOT NULL,
             created_at TEXT NOT NULL,
             payload TEXT NOT NULL,
-            PRIMARY KEY (question, role, metric_id, definition_hash)
+            PRIMARY KEY (question, role, metric_id, cache_key)
         )
         """
     )
 
 
 def _ensure_answer_cache(conn: sqlite3.Connection) -> None:
-    """Key cached answers by question, role, metric, and definition hash.
+    """Key cached answers by question, role, metric, and cache key.
 
-    A cache row from before that key is dropped. Serving it would let a later
-    definition inherit SQL that was generated for an older one.
+    The cache key covers the whole metric, the model id, and the prompt
+    version. A row from an older primary key is dropped. Serving it would
+    reuse SQL that was generated for a different prompt.
     """
     present = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'answer_cache'"
@@ -204,20 +206,29 @@ class AuditLog:
         return int(row["failures"])
 
     def cached_answer(
-        self, question: str, role: str, metric_id: str, definition_hash: str
+        self,
+        question: str,
+        role: str,
+        metric_id: str,
+        definition_hash: str,
+        *,
+        cache_key: str | None = None,
     ) -> str | None:
-        """Return a cached payload for this question, role, metric, and definition.
+        """Return a cached payload for this question, role, metric, and cache key.
 
-        The row must be under 24 hours old. A different definition hash is a miss.
+        The row must be under 24 hours old. A different cache key is a miss.
+        When cache_key is omitted, the definition hash is used as the key.
         """
+        key = definition_hash if cache_key is None else cache_key
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%SZ")
         with self._session() as conn:
             row = conn.execute(
                 """
                 SELECT payload, created_at FROM answer_cache
-                WHERE question = ? AND role = ? AND metric_id = ? AND definition_hash = ?
+                WHERE question = ? AND role = ? AND metric_id = ?
+                  AND definition_hash = ? AND cache_key = ?
                 """,
-                (question, role, metric_id, definition_hash),
+                (question, role, metric_id, definition_hash, key),
             ).fetchone()
             if row is None:
                 return None
@@ -225,9 +236,10 @@ class AuditLog:
                 conn.execute(
                     """
                     DELETE FROM answer_cache
-                    WHERE question = ? AND role = ? AND metric_id = ? AND definition_hash = ?
+                    WHERE question = ? AND role = ? AND metric_id = ?
+                      AND definition_hash = ? AND cache_key = ?
                     """,
-                    (question, role, metric_id, definition_hash),
+                    (question, role, metric_id, definition_hash, key),
                 )
                 return None
             return str(row["payload"])
@@ -239,19 +251,23 @@ class AuditLog:
         metric_id: str,
         definition_hash: str,
         payload: str,
+        *,
+        cache_key: str | None = None,
     ) -> None:
+        key = definition_hash if cache_key is None else cache_key
         with self._session() as conn:
             conn.execute(
                 """
                 INSERT INTO answer_cache (
-                    question, role, metric_id, definition_hash, created_at, payload
+                    question, role, metric_id, definition_hash, cache_key, created_at, payload
                 )
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(question, role, metric_id, definition_hash) DO UPDATE SET
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(question, role, metric_id, cache_key) DO UPDATE SET
                     created_at = excluded.created_at,
+                    definition_hash = excluded.definition_hash,
                     payload = excluded.payload
                 """,
-                (question, role, metric_id, definition_hash, _stamp(), payload),
+                (question, role, metric_id, definition_hash, key, _stamp(), payload),
             )
 
     def llm_calls_today(self) -> int:

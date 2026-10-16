@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+import json
+from dataclasses import dataclass, fields
 from datetime import date, datetime
 from pathlib import Path
 
@@ -191,3 +192,31 @@ def match_metrics(
 def definition_hash(metric: Metric) -> str:
     """First 12 hex characters of the sha256 of the definition text."""
     return hashlib.sha256(metric.definition.encode("utf-8")).hexdigest()[:12]
+
+
+def _cache_value(value: object) -> object:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, tuple):
+        return [_cache_value(item) for item in value]
+    if isinstance(value, list):
+        return [_cache_value(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _cache_value(item) for key, item in value.items()}
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
+
+def metric_cache_key(metric: Metric, *, model: str, prompt_version: str) -> str:
+    """12 hex chars covering the metric, the model id, and the prompt version.
+
+    Fields are read from the dataclass, so a field added later is part of the
+    key without a hand-written list.
+    """
+    record = {item.name: _cache_value(getattr(metric, item.name)) for item in fields(metric)}
+    document = {"metric": record, "model": model, "prompt_version": prompt_version}
+    encoded = json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:12]

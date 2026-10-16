@@ -172,6 +172,7 @@ The index is a SQLite file plus NumPy cosine search, under `data/knowledge/index
 | `AUDIT_PATH` | Usage log. Default `data/audit.db`. |
 | `MAX_RESULT_ROWS` | Cap on fetched rows. Default 500. |
 | `MAX_LLM_CALLS_PER_DAY` | Cap on language-model calls per UTC day. Default 500. Past the cap, the local planner writes the SQL and the assumptions say so. An answer for the same question and role is reused for 24 hours. |
+| `SQL_TIMEOUT_MS` | Wall-clock limit on one statement, in milliseconds. Default 5000. `0` disables the limit. A query that runs past it is aborted and the answer comes back as an error, so one slow statement cannot hold the worker. |
 | `EMBEDDING_PROVIDER` | `local` (default) or `openrouter`. Local hashing needs no key. |
 | `EMBEDDING_MODEL` | Embedding model id when the provider is `openrouter`. Default `openai/text-embedding-3-small`. |
 | `EMBEDDING_API_KEY` | Key for the embeddings call. Falls back to `OPENROUTER_API_KEY` when the provider is `openrouter`. |

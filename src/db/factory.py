@@ -10,7 +10,7 @@ from src.db.sqlite import SqliteAdapter
 
 def build_adapter(settings: Settings) -> SqliteAdapter | PostgresAdapter | AthenaAdapter:
     if settings.db_backend == "sqlite":
-        return SqliteAdapter(settings.db_path)
+        return SqliteAdapter(settings.db_path, statement_timeout_ms=settings.sql_timeout_ms)
     if settings.db_backend == "postgres":
         if not settings.database_url:
             raise ConfigError("DB_BACKEND=postgres requires DATABASE_URL.")

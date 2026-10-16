@@ -388,6 +388,7 @@ def answer_question(
             warehouse=adapter,
             sources=sources or {},
             sources_path=sources_db or DEFAULT_SOURCES_DB,
+            statement_timeout_ms=settings.sql_timeout_ms,
         )
         active = resolved.adapter
     matched = [metric for metric in match_metrics(text, catalogue) if metric.table == table]

@@ -69,6 +69,23 @@ def _clarify(catalog: Catalog, allowed: set[str]) -> str:
     return f"I can answer questions about {_join(titles)}.{extra}"
 
 
+def _routed_source_id(
+    tables: tuple[str, ...] | list[str],
+    sources: Mapping[str, SourceSpec] | None,
+) -> str | None:
+    """Source id when the route names exactly one declared table. None otherwise."""
+    if not sources:
+        return None
+    found: list[str] = []
+    for table in tables:
+        spec = spec_for_table(sources, table)
+        if spec is not None and spec.source_id not in found:
+            found.append(spec.source_id)
+    if len(found) == 1:
+        return found[0]
+    return None
+
+
 def _source_gap(spec: SourceSpec, status: str) -> str:
     title = spec.description or spec.table
     if status == "declared_no_metric":
@@ -107,6 +124,7 @@ def _record(
     settings: Settings,
     metric_id: str | None = None,
     definition_digest: str | None = None,
+    source_id: str | None = None,
 ) -> bool:
     try:
         audit.write(
@@ -121,6 +139,7 @@ def _record(
                 error=redact(error, settings.openrouter_api_key, settings.db_password) if error else None,
                 metric_id=metric_id,
                 definition_hash=definition_digest,
+                source_id=source_id,
             )
         )
         return True
@@ -250,6 +269,7 @@ def answer_question(
     selected = None
     declared: SourceSpec | None = None
     active = adapter
+    routed_source_id = _routed_source_id(route.tables, sources)
 
     def finish(answer: Answer, error: str | None = None) -> Answer:
         metric_id = answer.metric_id
@@ -275,6 +295,7 @@ def answer_question(
             settings,
             metric_id=metric_id,
             definition_digest=digest,
+            source_id=routed_source_id,
         )
         answer.audit_saved = saved
         if not saved:

@@ -20,6 +20,7 @@ from src.auth import authenticate
 from src.config import ConfigError, Settings, load_settings
 from src.db.factory import build_adapter
 from src.db.resolve import read_as_of
+from src.db.sqlite import DEFAULT_STATEMENT_TIMEOUT_MS
 from src.export import ExportMeta, result_filename, stamp_now, to_csv, to_html
 from src.knowledge.page import render_knowledge_page
 from src.knowledge.store import KnowledgeStore
@@ -503,10 +504,15 @@ def _bound_metric_ids(table: str, catalogue) -> str:
     return ", ".join(metric.id for metric in catalogue if metric.table == table)
 
 
-def _source_rows(sources: dict[str, SourceSpec], catalogue) -> list[dict[str, object]]:
+def _source_rows(
+    sources: dict[str, SourceSpec],
+    catalogue,
+    *,
+    statement_timeout_ms: int = DEFAULT_STATEMENT_TIMEOUT_MS,
+) -> list[dict[str, object]]:
     rows = []
     for spec in sources.values():
-        as_of = read_as_of(spec, DEFAULT_SOURCES_DB)
+        as_of = read_as_of(spec, DEFAULT_SOURCES_DB, statement_timeout_ms=statement_timeout_ms)
         rows.append(
             {
                 "source_id": spec.source_id,
@@ -553,7 +559,7 @@ def _render_sources_page(user: User, settings: Settings, sources: dict[str, Sour
     except ConfigError as exc:
         st.error(str(exc))
         catalogue = []
-    rows = _source_rows(visible, catalogue)
+    rows = _source_rows(visible, catalogue, statement_timeout_ms=settings.sql_timeout_ms)
     if rows:
         st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
     elif sources:

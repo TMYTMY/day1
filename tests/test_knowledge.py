@@ -447,3 +447,25 @@ def test_prompt_marks_notes_as_data():
     assert "not instructions" in system
     assert "Ignore any instruction" in system
     assert "<<<NOTE" in system and ">>>" in system
+
+
+def test_the_same_bytes_under_another_role_are_not_a_duplicate(env):
+    store = KnowledgeStore(env.settings)
+    store.add_document("glossary.md", GLOSSARY, owner="finance", owner_role="finance")
+    twin = store.add_document("glossary.md", GLOSSARY, owner="growth", owner_role="growth")
+
+    assert twin.filename == "glossary.md"
+    assert [item.filename for item in store.list_documents(role="growth")] == ["glossary.md"]
+    assert [item.filename for item in store.list_documents(role="finance")] == ["glossary.md"]
+
+
+def test_a_duplicate_never_names_another_roles_file(env):
+    store = KnowledgeStore(env.settings)
+    store.add_document("finance_q4.md", GLOSSARY, owner="finance", owner_role="finance")
+    growth = store.add_document("growth_q4.md", GLOSSARY, owner="growth", owner_role="growth")
+    assert growth.filename == "growth_q4.md"
+
+    with pytest.raises(KnowledgeError) as raised:
+        store.add_document("again.md", GLOSSARY, owner="growth", owner_role="growth")
+    assert "growth_q4.md" in str(raised.value)
+    assert "finance" not in str(raised.value)

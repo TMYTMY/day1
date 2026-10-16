@@ -10,6 +10,9 @@ from dotenv import load_dotenv
 
 ROOT = Path(__file__).resolve().parents[1]
 
+# Wall-clock limit on one statement, in milliseconds. 0 disables the limit.
+DEFAULT_SQL_TIMEOUT_MS = 5000
+
 
 class ConfigError(Exception):
     """The app cannot start because a config file or env value is invalid."""
@@ -46,6 +49,7 @@ class Settings:
     embedding_model: str
     embedding_api_key: str | None
     max_llm_calls_per_day: int = 500
+    sql_timeout_ms: int = DEFAULT_SQL_TIMEOUT_MS
     metrics_path: Path = field(default_factory=lambda: ROOT / "config" / "metrics.yaml")
 
     def __repr__(self) -> str:
@@ -98,6 +102,12 @@ def load_settings() -> Settings:
         raise ConfigError("MAX_LLM_CALLS_PER_DAY must be an integer.") from exc
     if max_llm_calls_per_day < 0:
         raise ConfigError("MAX_LLM_CALLS_PER_DAY must be zero or greater.")
+    try:
+        sql_timeout_ms = int(os.environ.get("SQL_TIMEOUT_MS", str(DEFAULT_SQL_TIMEOUT_MS)))
+    except ValueError as exc:
+        raise ConfigError("SQL_TIMEOUT_MS must be an integer.") from exc
+    if sql_timeout_ms < 0:
+        raise ConfigError("SQL_TIMEOUT_MS must be zero or greater.")
     return Settings(
         db_backend=backend,
         db_path=_resolve(os.environ.get("DB_PATH", ""), "data/demo.db"),
@@ -125,5 +135,6 @@ def load_settings() -> Settings:
         or "openai/text-embedding-3-small",
         embedding_api_key=embedding_key,
         max_llm_calls_per_day=max_llm_calls_per_day,
+        sql_timeout_ms=sql_timeout_ms,
         metrics_path=_resolve(os.environ.get("METRICS_PATH", ""), "config/metrics.yaml"),
     )

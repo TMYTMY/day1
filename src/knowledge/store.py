@@ -240,8 +240,11 @@ class KnowledgeStore:
         content_hash = hashlib.sha256(data).hexdigest()
         with self._lock, self._session() as conn:
             existing = conn.execute(
-                "SELECT id, filename FROM documents WHERE content_hash = ? AND embedding_id = ?",
-                (content_hash, self.embedder.embedding_id),
+                """
+                SELECT id, filename FROM documents
+                WHERE content_hash = ? AND embedding_id = ? AND owner_role = ?
+                """,
+                (content_hash, self.embedder.embedding_id, owner_role),
             ).fetchone()
         if existing is not None:
             raise KnowledgeError(

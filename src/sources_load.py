@@ -55,6 +55,7 @@ def load_file(
     header_row: int = 1,
     fill_merged: bool = False,
     replace: bool = False,
+    as_of_column: str | None = None,
     sources_dir: Path | None = None,
     db_path: Path | None = None,
 ) -> SourceSpec:
@@ -103,6 +104,7 @@ def load_file(
             "description": description,
             "synonyms": list(synonyms),
             "formula_cells_without_cache": uncached,
+            **({"as_of_column": as_of_column.strip()} if as_of_column and as_of_column.strip() else {}),
         },
         filename=f"{source_id.strip()}.yaml",
     )
@@ -139,6 +141,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--header-row", type=int, default=1)
     parser.add_argument("--fill-merged", action="store_true")
     parser.add_argument("--replace", action="store_true")
+    parser.add_argument("--as-of-column", default=None)
     args = parser.parse_args(argv)
     sheet = args.sheet.strip() if isinstance(args.sheet, str) else None
     try:
@@ -153,6 +156,7 @@ def main(argv: list[str] | None = None) -> int:
             header_row=args.header_row,
             fill_merged=args.fill_merged,
             replace=args.replace,
+            as_of_column=args.as_of_column,
         )
     except ConfigError as exc:
         print(str(exc), file=sys.stderr)
@@ -222,6 +226,8 @@ def _write_manifest(path: Path, spec: SourceSpec) -> None:
         "synonyms": list(spec.synonyms),
         "formula_cells_without_cache": spec.formula_cells_without_cache,
     }
+    if spec.as_of_column:
+        payload["as_of_column"] = spec.as_of_column
     text = yaml.safe_dump(payload, sort_keys=False, allow_unicode=True)
     temporary = path.with_suffix(".yaml.tmp")
     temporary.write_text(text, encoding="utf-8")

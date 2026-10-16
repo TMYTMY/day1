@@ -15,6 +15,7 @@ from src.routing import Catalog, Topic
 
 DEFAULT_SOURCES_DIR = ROOT / "config" / "sources"
 DEFAULT_SOURCES_DB = ROOT / "data" / "sources.sqlite"
+DEFAULT_STAGING_DIR = ROOT / "data" / "staging"
 
 _REQUIRED = (
     "source_id",
@@ -47,6 +48,7 @@ class SourceSpec:
     description: str
     synonyms: tuple[str, ...]
     formula_cells_without_cache: int = 0
+    as_of_column: str | None = None
 
 
 def load_sources(directory: Path) -> dict[str, SourceSpec]:
@@ -152,6 +154,13 @@ def source_from_mapping(entry: object, *, filename: str) -> SourceSpec:
             source_id,
             "formula_cells_without_cache",
         )
+    as_of_column = None
+    if "as_of_column" in entry and entry["as_of_column"] is not None:
+        as_of_column = _identifier(entry["as_of_column"], source_id, "as_of_column", _COLUMN)
+        if as_of_column not in columns:
+            raise ConfigError(
+                f"Source {source_id} as_of_column {as_of_column} is not a declared column."
+            )
     return SourceSpec(
         source_id=source_id,
         table=table,
@@ -164,6 +173,7 @@ def source_from_mapping(entry: object, *, filename: str) -> SourceSpec:
         description=description,
         synonyms=synonyms,
         formula_cells_without_cache=uncached,
+        as_of_column=as_of_column,
     )
 
 

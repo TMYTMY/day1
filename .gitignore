@@ -10,5 +10,6 @@ data/*.db
 data/*.db-wal
 data/*.db-shm
 data/knowledge/
+data/staging/
 *.egg-info/
 .DS_Store

@@ -7,7 +7,9 @@ driven, so an idle browser tab keeps its server-side session until the next even
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timezone
+from pathlib import Path
 from uuid import uuid4
 
 import pandas as pd
@@ -17,15 +19,25 @@ from src.audit import AuditLog
 from src.auth import authenticate
 from src.config import ConfigError, Settings, load_settings
 from src.db.factory import build_adapter
+from src.db.resolve import read_as_of
 from src.export import ExportMeta, result_filename, stamp_now, to_csv, to_html
 from src.knowledge.page import render_knowledge_page
 from src.knowledge.store import KnowledgeStore
 from src.llm import LlmClient
+from src.metrics import load_metrics
 from src.models import Answer, User
 from src.pipeline import answer_question
 from src.present import column_label, format_value, is_money, looks_like_time
 from src.routing import Catalog, load_catalog
-from src.sources import DEFAULT_SOURCES_DB, DEFAULT_SOURCES_DIR, SourceSpec, load_sources, merge_catalog
+from src.sources import (
+    DEFAULT_SOURCES_DB,
+    DEFAULT_SOURCES_DIR,
+    DEFAULT_STAGING_DIR,
+    SourceSpec,
+    load_sources,
+    merge_catalog,
+    source_status,
+)
 
 logger = logging.getLogger("fieldnote")
 
@@ -408,17 +420,139 @@ def _sign_out() -> None:
     st.session_state.pop("nav_page", None)
     st.session_state.pop("kb_seen_ids", None)
     st.session_state.pop("kb_notice", None)
+    st.session_state.pop("staged_seen_ids", None)
     st.rerun()
 
 
 def _page_choice() -> str:
+    labels = {"ask": "Ask", "knowledge": "知識庫", "sources": "Data sources"}
     with st.sidebar:
         return st.radio(
             "Navigate",
-            options=["ask", "knowledge"],
-            format_func=lambda value: "Ask" if value == "ask" else "知識庫",
+            options=["ask", "knowledge", "sources"],
+            format_func=lambda value: labels[value],
             key="nav_page",
         )
+
+
+def _capability_line(sources: dict[str, SourceSpec]) -> str:
+    line = "You can ask about revenue and daily active users, in English or Cantonese."
+    titles = [spec.description or spec.table for spec in sources.values()]
+    if titles:
+        line += " Declared sources: " + ", ".join(titles) + "."
+    return line
+
+
+_STAGED_SUFFIXES = {".csv", ".tsv", ".xlsx", ".xlsm"}
+_STAGED_NAME = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def _stage_upload(uploaded) -> Path:
+    """Park an upload in quarantine. This does not declare the source."""
+    original = Path(str(getattr(uploaded, "name", "") or "")).name
+    suffix = Path(original).suffix.lower()
+    if suffix not in _STAGED_SUFFIXES:
+        raise ValueError(
+            f"Unsupported file type {suffix or '(none)'}. Accepted types: .csv, .tsv, .xlsx, .xlsm."
+        )
+    safe = _STAGED_NAME.sub("_", original).strip("._") or "upload"
+    if not safe.lower().endswith(suffix):
+        safe = f"{safe}{suffix}"
+    DEFAULT_STAGING_DIR.mkdir(parents=True, exist_ok=True)
+    destination = DEFAULT_STAGING_DIR / safe
+    destination.write_bytes(uploaded.getvalue())
+    return destination
+
+
+def _declare_command(path: Path) -> str:
+    return (
+        f"python -m src.sources_load {path.as_posix()} --id <source_id> "
+        "--table <table> --owner-role <role> --description \"...\" --synonym <word>"
+    )
+
+
+def _bound_metric_ids(table: str, catalogue) -> str:
+    return ", ".join(metric.id for metric in catalogue if metric.table == table)
+
+
+def _source_rows(sources: dict[str, SourceSpec], catalogue) -> list[dict[str, object]]:
+    rows = []
+    for spec in sources.values():
+        as_of = read_as_of(spec, DEFAULT_SOURCES_DB)
+        rows.append(
+            {
+                "source_id": spec.source_id,
+                "table": spec.table,
+                "owner_role": spec.owner_role,
+                "row_count": spec.row_count,
+                "loaded_at": spec.loaded_at,
+                "sha256": spec.sha256[:8],
+                "status": source_status(spec, catalogue),
+                "metrics": _bound_metric_ids(spec.table, catalogue),
+                "as_of": as_of or "",
+            }
+        )
+    return rows
+
+
+def _render_sources_page(user: User, settings: Settings, sources: dict[str, SourceSpec]) -> None:
+    with st.sidebar:
+        st.markdown('<p class="fn-kicker">Signed in</p>', unsafe_allow_html=True)
+        st.subheader(user.username)
+        st.caption(f"Role · {user.role}")
+        if st.button("Sign out", key="sign_out_sources", width="stretch"):
+            _sign_out()
+        _source_link()
+    st.markdown('<p class="fn-kicker">Data sources</p>', unsafe_allow_html=True)
+    st.title("Data sources")
+    st.caption(_capability_line(sources))
+    st.warning("not declared = cannot be queried")
+    uploads = st.file_uploader(
+        "Stage a file for declaration",
+        type=["csv", "tsv", "xlsx", "xlsm"],
+        accept_multiple_files=True,
+        key="source_upload",
+        help="The file stays in quarantine until someone runs the declaration command.",
+    )
+    staged_now = _consume_staged_uploads(uploads or [])
+    try:
+        catalogue = load_metrics(settings.metrics_path)
+    except ConfigError as exc:
+        st.error(str(exc))
+        catalogue = []
+    rows = _source_rows(sources, catalogue)
+    if rows:
+        st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+    else:
+        st.info("No declared sources yet. A file is not queryable until its YAML manifest is written.")
+    staged = sorted(path for path in DEFAULT_STAGING_DIR.glob("*") if path.is_file()) if DEFAULT_STAGING_DIR.is_dir() else []
+    if staged or staged_now:
+        st.markdown("**Quarantine**")
+        st.caption("Each file below is still quarantined. Uploading it did not declare a source.")
+        for path in staged:
+            st.markdown(f"**{path.name}** · status `quarantined`")
+            st.code(_declare_command(path), language="text")
+
+
+def _consume_staged_uploads(uploads: list) -> list[str]:
+    seen: list[str] = st.session_state.setdefault("staged_seen_ids", [])
+    fresh: list[str] = []
+    for uploaded in uploads:
+        file_id = getattr(uploaded, "file_id", None) or f"{uploaded.name}:{getattr(uploaded, 'size', 0)}"
+        if file_id in seen:
+            continue
+        try:
+            path = _stage_upload(uploaded)
+        except ValueError as exc:
+            st.error(str(exc))
+            continue
+        seen.append(file_id)
+        fresh.append(path.name)
+        st.success(f"Staged {path.name}. not declared = cannot be queried")
+        st.code(_declare_command(path), language="text")
+    if fresh:
+        st.session_state.staged_seen_ids = seen
+    return fresh
 
 
 def _consume_pending(
@@ -487,6 +621,9 @@ def main() -> None:
             _source_link()
         render_knowledge_page(knowledge, settings, user)
         return
+    if page == "sources":
+        _render_sources_page(user, settings, sources)
+        return
 
     st.markdown('<p class="fn-kicker">Warehouse Q&A</p>', unsafe_allow_html=True)
     st.title("Fieldnote")
@@ -495,6 +632,7 @@ def main() -> None:
         "then a read-only query runs on the columns your role can access. "
         "Open 知識庫 to add glossary notes for the language model."
     )
+    st.caption(_capability_line(sources))
     _consume_pending(user, settings, adapter, catalog, audit, llm, knowledge, sources)
     _sidebar(user, settings, adapter, audit)
     for message in st.session_state.messages:

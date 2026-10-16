@@ -210,13 +210,25 @@ def _cache_value(value: object) -> object:
     return str(value)
 
 
-def metric_cache_key(metric: Metric, *, model: str, prompt_version: str) -> str:
+def metric_cache_key(
+    metric: Metric,
+    *,
+    model: str,
+    prompt_version: str,
+    source_id: str | None = None,
+    source_sha256: str | None = None,
+) -> str:
     """12 hex chars covering the metric, the model id, and the prompt version.
 
     Fields are read from the dataclass, so a field added later is part of the
-    key without a hand-written list.
+    key without a hand-written list. A declared source also binds ``source_id``
+    and its file sha256, so replacing that file misses the previous answer.
+    Omitting both source fields leaves the key unchanged.
     """
     record = {item.name: _cache_value(getattr(metric, item.name)) for item in fields(metric)}
-    document = {"metric": record, "model": model, "prompt_version": prompt_version}
+    document: dict[str, object] = {"metric": record, "model": model, "prompt_version": prompt_version}
+    if source_id is not None or source_sha256 is not None:
+        document["source_id"] = source_id
+        document["source_sha256"] = source_sha256
     encoded = json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:12]

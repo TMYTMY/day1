@@ -31,6 +31,7 @@ from src.sources import (
     DEFAULT_SOURCES_DIR,
     SourceSpec,
     load_sources,
+    reject_warehouse_table,
     source_from_mapping,
 )
 
@@ -58,6 +59,8 @@ def load_file(
     as_of_column: str | None = None,
     sources_dir: Path | None = None,
     db_path: Path | None = None,
+    routing_path: Path | None = None,
+    warehouse_path: Path | None = None,
 ) -> SourceSpec:
     """Stage ``file`` into the sources database and write its YAML manifest."""
     path = Path(file)
@@ -115,6 +118,12 @@ def load_file(
             f"({previous.sha256} != {spec.sha256}). Pass --replace to overwrite it."
         )
     _reject_duplicate_table(manifest_dir, spec)
+    reject_warehouse_table(
+        spec.table,
+        source_id=spec.source_id,
+        routing_path=routing_path,
+        warehouse_path=warehouse_path,
+    )
     _write_table(
         database,
         spec.table,

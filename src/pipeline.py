@@ -69,9 +69,26 @@ def _clarify(catalog: Catalog, allowed: set[str]) -> str:
     return f"I can answer questions about {_join(titles)}.{extra}"
 
 
+def _source_shadows_warehouse(catalog: Catalog, adapter: object, spec: SourceSpec) -> bool:
+    """True when this declaration would hide a table the warehouse already owns."""
+    for topic in catalog.topics:
+        if spec.table in topic.tables and topic.id != spec.source_id:
+            return True
+    get_schema = getattr(adapter, "get_schema", None)
+    if not callable(get_schema):
+        return False
+    try:
+        schema = get_schema(spec.table)
+    except (sqlite3.Error, OSError, NotImplementedError):
+        return False
+    return schema is not None
+
+
 def _routed_source_id(
     tables: tuple[str, ...] | list[str],
     sources: Mapping[str, SourceSpec] | None,
+    catalog: Catalog,
+    adapter: object,
 ) -> str | None:
     """Source id when the route names exactly one declared table. None otherwise."""
     if not sources:
@@ -79,7 +96,9 @@ def _routed_source_id(
     found: list[str] = []
     for table in tables:
         spec = spec_for_table(sources, table)
-        if spec is not None and spec.source_id not in found:
+        if spec is None or _source_shadows_warehouse(catalog, adapter, spec):
+            continue
+        if spec.source_id not in found:
             found.append(spec.source_id)
     if len(found) == 1:
         return found[0]
@@ -161,11 +180,17 @@ def _blocked_message(reason: str) -> str:
     return "The query was blocked by the read-only SQL check."
 
 
-def _answer_cache_key(metric: Metric, settings: Settings) -> str:
+def _answer_cache_key(
+    metric: Metric,
+    settings: Settings,
+    spec: SourceSpec | None = None,
+) -> str:
     return metric_cache_key(
         metric,
         model=settings.openrouter_model,
         prompt_version=PROMPT_VERSION,
+        source_id=None if spec is None else spec.source_id,
+        source_sha256=None if spec is None else spec.sha256,
     )
 
 
@@ -269,7 +294,7 @@ def answer_question(
     selected = None
     declared: SourceSpec | None = None
     active = adapter
-    routed_source_id = _routed_source_id(route.tables, sources)
+    routed_source_id = _routed_source_id(route.tables, sources, catalog, adapter)
 
     def finish(answer: Answer, error: str | None = None) -> Answer:
         metric_id = answer.metric_id
@@ -314,7 +339,7 @@ def answer_question(
                     selected.id,
                     digest,
                     _dump_answer(answer),
-                    cache_key=_answer_cache_key(selected, settings),
+                    cache_key=_answer_cache_key(selected, settings, declared),
                 )
             except (sqlite3.Error, TypeError, ValueError):
                 pass
@@ -350,6 +375,8 @@ def answer_question(
     table = permitted[0]
     catalogue = load_metrics(settings.metrics_path)
     declared = spec_for_table(sources or {}, table)
+    if declared is not None and _source_shadows_warehouse(catalog, adapter, declared):
+        declared = None
     if declared is not None:
         availability = source_status(declared, catalogue)
         if availability != "answerable":
@@ -388,7 +415,7 @@ def answer_question(
             user.role,
             selected.id,
             definition_digest,
-            cache_key=_answer_cache_key(selected, settings),
+            cache_key=_answer_cache_key(selected, settings, declared),
         )
     except sqlite3.Error:
         cached_payload = None

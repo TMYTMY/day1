@@ -9,7 +9,12 @@ from pathlib import Path
 
 import yaml
 
-from src.config import ConfigError
+from src.config import ROOT, ConfigError
+from src.metrics import Metric, active_metrics
+from src.routing import Catalog, Topic
+
+DEFAULT_SOURCES_DIR = ROOT / "config" / "sources"
+DEFAULT_SOURCES_DB = ROOT / "data" / "sources.sqlite"
 
 _REQUIRED = (
     "source_id",
@@ -64,6 +69,48 @@ def load_sources(directory: Path) -> dict[str, SourceSpec]:
 
 def declared_tables(specs: Mapping[str, SourceSpec]) -> set[str]:
     return {spec.table for spec in specs.values()}
+
+
+def spec_for_table(specs: Mapping[str, SourceSpec], table: str) -> SourceSpec | None:
+    for spec in specs.values():
+        if spec.table == table:
+            return spec
+    return None
+
+
+def source_status(spec: SourceSpec | None, metrics_catalogue: list[Metric]) -> str:
+    """``quarantined`` has no declaration, ``declared_no_metric`` cannot be asked, ``answerable`` can."""
+    if spec is None:
+        return "quarantined"
+    bound = [metric for metric in active_metrics(metrics_catalogue) if metric.table == spec.table]
+    if not bound:
+        return "declared_no_metric"
+    return "answerable"
+
+
+def merge_catalog(catalog: Catalog, specs: Mapping[str, SourceSpec]) -> Catalog:
+    """Add declaration topics after ``load_catalog``. This is the only automatic binding."""
+    if not specs:
+        return catalog
+    descriptions = dict(catalog.descriptions)
+    topics = list(catalog.topics)
+    for spec in specs.values():
+        topics.append(_topic(spec))
+        descriptions.setdefault(spec.table, spec.description)
+    return Catalog(topics=tuple(topics), descriptions=descriptions)
+
+
+def _topic(spec: SourceSpec) -> Topic:
+    synonyms = list(spec.synonyms)
+    folded = {item.casefold() for item in synonyms}
+    if spec.table.casefold() not in folded:
+        synonyms.append(spec.table)
+    return Topic(
+        id=spec.source_id,
+        title=spec.description or spec.table,
+        tables=(spec.table,),
+        synonyms=tuple(synonyms),
+    )
 
 
 def _parse_file(path: Path) -> SourceSpec:

@@ -25,6 +25,7 @@ from src.models import Answer, User
 from src.pipeline import answer_question
 from src.present import column_label, format_value, is_money, looks_like_time
 from src.routing import Catalog, load_catalog
+from src.sources import DEFAULT_SOURCES_DB, DEFAULT_SOURCES_DIR, SourceSpec, load_sources, merge_catalog
 
 logger = logging.getLogger("fieldnote")
 
@@ -335,6 +336,7 @@ def _run_turn(
     audit: AuditLog,
     llm: LlmClient,
     knowledge: KnowledgeStore,
+    sources: dict[str, SourceSpec],
 ) -> None:
     try:
         answer = answer_question(
@@ -346,6 +348,8 @@ def _run_turn(
             audit=audit,
             llm=llm,
             knowledge=knowledge,
+            sources=sources,
+            sources_db=DEFAULT_SOURCES_DB,
         )
     except Exception:
         logger.exception("answer failed")
@@ -425,6 +429,7 @@ def _consume_pending(
     audit: AuditLog,
     llm: LlmClient,
     knowledge: KnowledgeStore,
+    sources: dict[str, SourceSpec],
 ) -> None:
     pending = st.session_state.pop("pending", None)
     prompt = st.chat_input("Ask about revenue or daily active users", key="chat")
@@ -432,7 +437,7 @@ def _consume_pending(
         pending = prompt
     if pending:
         with st.spinner("Checking access and running a read-only query..."):
-            _run_turn(pending, user, settings, adapter, catalog, audit, llm, knowledge)
+            _run_turn(pending, user, settings, adapter, catalog, audit, llm, knowledge, sources)
 
 
 def main() -> None:
@@ -442,7 +447,8 @@ def main() -> None:
     try:
         settings = load_settings()
         adapter = build_adapter(settings)
-        catalog = load_catalog(settings.routing_path)
+        sources = load_sources(DEFAULT_SOURCES_DIR)
+        catalog = merge_catalog(load_catalog(settings.routing_path), sources)
         audit = AuditLog(settings.audit_path)
         llm = LlmClient(
             settings.openrouter_api_key,
@@ -489,7 +495,7 @@ def main() -> None:
         "then a read-only query runs on the columns your role can access. "
         "Open 知識庫 to add glossary notes for the language model."
     )
-    _consume_pending(user, settings, adapter, catalog, audit, llm, knowledge)
+    _consume_pending(user, settings, adapter, catalog, audit, llm, knowledge, sources)
     _sidebar(user, settings, adapter, audit)
     for message in st.session_state.messages:
         _render_message(message)

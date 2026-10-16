@@ -25,11 +25,16 @@ from openpyxl import load_workbook
 from openpyxl.utils.exceptions import InvalidFileException
 from openpyxl.worksheet.worksheet import Worksheet
 
-from src.config import ROOT, ConfigError
-from src.sources import SourceSpec, load_sources, source_from_mapping
+from src.config import ConfigError
+from src.sources import (
+    DEFAULT_SOURCES_DB,
+    DEFAULT_SOURCES_DIR,
+    SourceSpec,
+    load_sources,
+    source_from_mapping,
+)
 
-DEFAULT_SOURCES_DIR = ROOT / "config" / "sources"
-DEFAULT_DB_PATH = ROOT / "data" / "sources.sqlite"
+DEFAULT_DB_PATH = DEFAULT_SOURCES_DB
 
 _TABULAR = {".csv", ".tsv"}
 _EXCEL = {".xlsx", ".xlsm"}

@@ -37,6 +37,7 @@ from src.sources import (
     load_sources,
     merge_catalog,
     source_status,
+    sources_for_user,
 )
 
 logger = logging.getLogger("fieldnote")
@@ -447,8 +448,27 @@ _STAGED_SUFFIXES = {".csv", ".tsv", ".xlsx", ".xlsm"}
 _STAGED_NAME = re.compile(r"[^A-Za-z0-9._-]+")
 
 
-def _stage_upload(uploaded) -> Path:
-    """Park an upload in quarantine. This does not declare the source."""
+def _user_staging_dir(user: User) -> Path:
+    safe = _STAGED_NAME.sub("_", user.username).strip("._") or "user"
+    return DEFAULT_STAGING_DIR / safe
+
+
+def _unused_staged_path(folder: Path, safe: str) -> Path:
+    """A free path in ``folder``. An existing file is never replaced."""
+    candidate = folder / safe
+    if not candidate.exists():
+        return candidate
+    stem = Path(safe).stem
+    suffix = Path(safe).suffix
+    for offset in range(1, 1000):
+        candidate = folder / f"{stem}-{offset}{suffix}"
+        if not candidate.exists():
+            return candidate
+    raise ValueError("Could not stage the file without overwriting an existing one.")
+
+
+def _stage_upload(uploaded, user: User) -> Path:
+    """Park an upload in that user's quarantine. This does not declare the source."""
     original = Path(str(getattr(uploaded, "name", "") or "")).name
     suffix = Path(original).suffix.lower()
     if suffix not in _STAGED_SUFFIXES:
@@ -458,10 +478,18 @@ def _stage_upload(uploaded) -> Path:
     safe = _STAGED_NAME.sub("_", original).strip("._") or "upload"
     if not safe.lower().endswith(suffix):
         safe = f"{safe}{suffix}"
-    DEFAULT_STAGING_DIR.mkdir(parents=True, exist_ok=True)
-    destination = DEFAULT_STAGING_DIR / safe
+    folder = _user_staging_dir(user)
+    folder.mkdir(parents=True, exist_ok=True)
+    destination = _unused_staged_path(folder, safe)
     destination.write_bytes(uploaded.getvalue())
     return destination
+
+
+def _staged_files(user: User) -> list[Path]:
+    folder = _user_staging_dir(user)
+    if not folder.is_dir():
+        return []
+    return sorted(path for path in folder.iterdir() if path.is_file())
 
 
 def _declare_command(path: Path) -> str:
@@ -505,7 +533,12 @@ def _render_sources_page(user: User, settings: Settings, sources: dict[str, Sour
         _source_link()
     st.markdown('<p class="fn-kicker">Data sources</p>', unsafe_allow_html=True)
     st.title("Data sources")
-    st.caption(_capability_line(sources))
+    visible = sources_for_user(sources, user)
+    st.caption(_capability_line(visible))
+    st.caption(
+        "owner_role records who supplied the file. It does not grant access. "
+        "A question is allowed only when the table is in your role's allowed tables."
+    )
     st.warning("not declared = cannot be queried")
     uploads = st.file_uploader(
         "Stage a file for declaration",
@@ -514,18 +547,20 @@ def _render_sources_page(user: User, settings: Settings, sources: dict[str, Sour
         key="source_upload",
         help="The file stays in quarantine until someone runs the declaration command.",
     )
-    staged_now = _consume_staged_uploads(uploads or [])
+    staged_now = _consume_staged_uploads(uploads or [], user)
     try:
         catalogue = load_metrics(settings.metrics_path)
     except ConfigError as exc:
         st.error(str(exc))
         catalogue = []
-    rows = _source_rows(sources, catalogue)
+    rows = _source_rows(visible, catalogue)
     if rows:
         st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+    elif sources:
+        st.info("No declared sources are visible for your role.")
     else:
         st.info("No declared sources yet. A file is not queryable until its YAML manifest is written.")
-    staged = sorted(path for path in DEFAULT_STAGING_DIR.glob("*") if path.is_file()) if DEFAULT_STAGING_DIR.is_dir() else []
+    staged = _staged_files(user)
     if staged or staged_now:
         st.markdown("**Quarantine**")
         st.caption("Each file below is still quarantined. Uploading it did not declare a source.")
@@ -534,7 +569,7 @@ def _render_sources_page(user: User, settings: Settings, sources: dict[str, Sour
             st.code(_declare_command(path), language="text")
 
 
-def _consume_staged_uploads(uploads: list) -> list[str]:
+def _consume_staged_uploads(uploads: list, user: User) -> list[str]:
     seen: list[str] = st.session_state.setdefault("staged_seen_ids", [])
     fresh: list[str] = []
     for uploaded in uploads:
@@ -542,7 +577,7 @@ def _consume_staged_uploads(uploads: list) -> list[str]:
         if file_id in seen:
             continue
         try:
-            path = _stage_upload(uploaded)
+            path = _stage_upload(uploaded, user)
         except ValueError as exc:
             st.error(str(exc))
             continue
@@ -632,7 +667,7 @@ def main() -> None:
         "then a read-only query runs on the columns your role can access. "
         "Open 知識庫 to add glossary notes for the language model."
     )
-    st.caption(_capability_line(sources))
+    st.caption(_capability_line(sources_for_user(sources, user)))
     _consume_pending(user, settings, adapter, catalog, audit, llm, knowledge, sources)
     _sidebar(user, settings, adapter, audit)
     for message in st.session_state.messages:

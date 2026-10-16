@@ -15,9 +15,10 @@ import pytest
 from openpyxl import Workbook
 
 from src.config import ConfigError
+from src.db.sqlite import SqliteAdapter
 from src.models import User
 from src.pipeline import answer_question
-from src.sources import load_sources, merge_catalog
+from src.sources import SourceSpec, load_sources, merge_catalog, sources_for_user
 from src.sources_load import load_file
 from src.sql_guard import check_sql
 from tests.test_pipeline import _Boom, _Off, _Scripted
@@ -487,3 +488,102 @@ def test_a_declared_table_cannot_shadow_a_warehouse_table(env, tmp_path):
             db_path=tmp_path / "extras.sqlite",
             warehouse_path=warehouse,
         )
+
+
+def _sample_spec(**overrides) -> SourceSpec:
+    payload = dict(
+        source_id="parcels_src",
+        table="shipments",
+        owner_role="logistics",
+        file_name="parcels.csv",
+        sha256="b" * 64,
+        row_count=1,
+        columns=("parcel_id", "amount"),
+        loaded_at="2026-01-01T00:00:00+00:00",
+        description="Parcels shipped",
+        synonyms=("parcels",),
+    )
+    payload.update(overrides)
+    return SourceSpec(**payload)
+
+
+def test_a_role_sees_only_its_own_declarations():
+    sources = {"parcels_src": _sample_spec()}
+    owner = User("clerk", "logistics", ("revenue",))
+    granted = User("analyst", "analyst", ("shipments", "revenue"))
+    finance = User("finance", "finance", ("revenue",))
+    assert list(sources_for_user(sources, owner)) == ["parcels_src"]
+    assert list(sources_for_user(sources, granted)) == ["parcels_src"]
+    assert sources_for_user(sources, finance) == {}
+
+
+def test_owner_role_does_not_grant_query_access(env, tmp_path):
+    _spec, sources, database = _declare(tmp_path, "parcel_id,amount\np-1,10\n")
+    owner = User("clerk", "logistics", ("revenue",))
+    answer = _ask_source(env, owner, "Show parcels", sources, database, llm=_Boom())
+    assert answer.status == "denied"
+    assert answer.sql is None
+    assert env.audit.recent("clerk")[0]["status"] == "denied"
+
+
+def test_quarantine_uploads_do_not_overwrite_each_other(tmp_path, monkeypatch):
+    import app
+
+    monkeypatch.setattr(app, "DEFAULT_STAGING_DIR", tmp_path / "staging")
+    alice = User("alice", "analyst", ("revenue",))
+    bob = User("bob", "finance", ("revenue",))
+
+    class _Upload:
+        def __init__(self, name: str, data: bytes):
+            self.name = name
+            self._data = data
+
+        def getvalue(self) -> bytes:
+            return self._data
+
+    first = app._stage_upload(_Upload("orders.csv", b"alice-first"), alice)
+    second = app._stage_upload(_Upload("orders.csv", b"alice-second"), alice)
+    other = app._stage_upload(_Upload("orders.csv", b"bob"), bob)
+    assert first.read_bytes() == b"alice-first"
+    assert second.read_bytes() == b"alice-second"
+    assert other.read_bytes() == b"bob"
+    assert first != second
+    assert other.parent != first.parent
+    assert {path.name for path in app._staged_files(alice)} == {first.name, second.name}
+    assert [path.name for path in app._staged_files(bob)] == [other.name]
+
+
+def test_sources_adapter_does_not_seed_over_declared_rows(tmp_path, monkeypatch):
+    path = tmp_path / "sources.sqlite"
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE shipments (parcel_id TEXT)")
+    conn.execute("INSERT INTO shipments VALUES ('keep')")
+    conn.commit()
+    conn.close()
+
+    def _refuse_seed(_target):
+        raise AssertionError("a sources database must not be seeded")
+
+    monkeypatch.setattr("src.db.sqlite.ensure_seeded", _refuse_seed)
+    adapter = SqliteAdapter(path, seed=False)
+    result = adapter.execute_select(
+        "SELECT parcel_id FROM shipments",
+        allowed_tables={"shipments"},
+        max_rows=10,
+    )
+    assert result.rows == ({"parcel_id": "keep"},)
+    raw = adapter._connect_readonly()
+    try:
+        with pytest.raises(sqlite3.OperationalError):
+            raw.execute("INSERT INTO shipments VALUES ('nope')")
+    finally:
+        raw.close()
+    monkeypatch.undo()
+    SqliteAdapter(path)
+    seeded = sqlite3.connect(path)
+    try:
+        names = {row[0] for row in seeded.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    finally:
+        seeded.close()
+    assert "shipments" not in names
+    assert "revenue" in names

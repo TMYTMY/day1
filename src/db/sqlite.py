@@ -50,9 +50,10 @@ class SqliteAdapter:
     dialect = "sqlite"
     display_name = "SQLite"
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, *, seed: bool = True):
         self.path = Path(path)
-        ensure_seeded(self.path)
+        if seed:
+            ensure_seeded(self.path)
 
     def _connect_readonly(self) -> sqlite3.Connection:
         quoted = quote(self.path.resolve().as_posix(), safe="/")

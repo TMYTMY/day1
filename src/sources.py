@@ -13,6 +13,7 @@ import yaml
 
 from src.config import ROOT, ConfigError
 from src.metrics import Metric, active_metrics
+from src.models import User
 from src.routing import Catalog, Topic, load_catalog
 
 DEFAULT_SOURCES_DIR = ROOT / "config" / "sources"
@@ -41,6 +42,12 @@ _SHA256 = re.compile(r"[0-9a-f]{64}")
 
 @dataclass(frozen=True)
 class SourceSpec:
+    """One declared file.
+
+    ``owner_role`` records who supplied the file. It does not grant access.
+    A question is allowed only when the table is in the user's allowed tables.
+    """
+
     source_id: str
     table: str
     owner_role: str
@@ -113,6 +120,20 @@ def load_sources(
         specs[spec.source_id] = spec
         tables.add(spec.table)
     return specs
+
+
+def sources_for_user(specs: Mapping[str, SourceSpec], user: User) -> dict[str, SourceSpec]:
+    """Declarations this user may see. Query permission stays on allowed tables.
+
+    A source is visible when its table is in ``allowed_tables`` or its advisory
+    ``owner_role`` matches the user's role. Other declarations stay hidden.
+    """
+    allowed = set(user.allowed_tables)
+    return {
+        source_id: spec
+        for source_id, spec in specs.items()
+        if spec.table in allowed or spec.owner_role == user.role
+    }
 
 
 def declared_tables(specs: Mapping[str, SourceSpec]) -> set[str]:

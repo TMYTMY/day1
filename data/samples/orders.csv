@@ -1,0 +1,6 @@
+order_id,customer,sku,quantity,amount
+1001,Ada North,ATLAS-1,2,40.00
+1002,Grace South,NORTH-2,1,15.50
+1003,Alan East,HARBOR-3,4,80.00
+1004,Katherine West,ATLAS-1,1,20.00
+1005,Edsger Harbor,NORTH-2,3,46.50

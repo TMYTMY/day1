@@ -1,9 +1,8 @@
 """Map a table name to the read-only database that holds it.
 
 ``data/demo.db`` and ``data/sources.sqlite`` stay separate. Declared tables
-use ``SqliteAdapter`` with the sources path. ``SqliteAdapter.__init__`` seeds
-the demo warehouse, which would erase a sources file, so the sources adapter
-is the same class with only the path set.
+use ``SqliteAdapter`` with seeding off. The default constructor rebuilds a
+database that is not the demo warehouse, which would erase a sources file.
 """
 
 from __future__ import annotations
@@ -58,6 +57,5 @@ def read_as_of(spec: SourceSpec, sources_path: Path) -> str | None:
 
 
 def _source_adapter(path: Path) -> SqliteAdapter:
-    adapter = SqliteAdapter.__new__(SqliteAdapter)
-    adapter.path = Path(path)
-    return adapter
+    """Open a sources database without running the demo seed."""
+    return SqliteAdapter(path, seed=False)

@@ -3,19 +3,24 @@
 from __future__ import annotations
 
 import re
+import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import quote
 
 import yaml
 
 from src.config import ROOT, ConfigError
 from src.metrics import Metric, active_metrics
-from src.routing import Catalog, Topic
+from src.models import User
+from src.routing import Catalog, Topic, load_catalog
 
 DEFAULT_SOURCES_DIR = ROOT / "config" / "sources"
 DEFAULT_SOURCES_DB = ROOT / "data" / "sources.sqlite"
 DEFAULT_STAGING_DIR = ROOT / "data" / "staging"
+DEFAULT_WAREHOUSE_DB = ROOT / "data" / "demo.db"
+DEFAULT_ROUTING = ROOT / "config" / "routing.yaml"
 
 _REQUIRED = (
     "source_id",
@@ -37,6 +42,12 @@ _SHA256 = re.compile(r"[0-9a-f]{64}")
 
 @dataclass(frozen=True)
 class SourceSpec:
+    """One declared file.
+
+    ``owner_role`` records who supplied the file. It does not grant access.
+    A question is allowed only when the table is in the user's allowed tables.
+    """
+
     source_id: str
     table: str
     owner_role: str
@@ -51,7 +62,43 @@ class SourceSpec:
     as_of_column: str | None = None
 
 
-def load_sources(directory: Path) -> dict[str, SourceSpec]:
+def warehouse_tables(
+    routing_path: Path | None = None,
+    warehouse_path: Path | None = None,
+) -> set[str]:
+    """Table names already owned by the routing catalog or the demo warehouse."""
+    names: set[str] = set()
+    route = Path(routing_path) if routing_path is not None else DEFAULT_ROUTING
+    if route.is_file():
+        catalog = load_catalog(route)
+        for topic in catalog.topics:
+            names.update(topic.tables)
+    database = Path(warehouse_path) if warehouse_path is not None else DEFAULT_WAREHOUSE_DB
+    names.update(_physical_tables(database))
+    return names
+
+
+def reject_warehouse_table(
+    table: str,
+    *,
+    source_id: str,
+    routing_path: Path | None = None,
+    warehouse_path: Path | None = None,
+) -> None:
+    """A declared source must not take the name of a warehouse table."""
+    if table in warehouse_tables(routing_path, warehouse_path):
+        raise ConfigError(
+            f"Source {source_id} table {table} already exists in the warehouse. "
+            "A declared source cannot use a warehouse table."
+        )
+
+
+def load_sources(
+    directory: Path,
+    *,
+    routing_path: Path | None = None,
+    warehouse_path: Path | None = None,
+) -> dict[str, SourceSpec]:
     """Read ``config/sources/*.yaml``. Missing fields and duplicate ids or tables fail."""
     path = Path(directory)
     if not path.is_dir():
@@ -60,6 +107,12 @@ def load_sources(directory: Path) -> dict[str, SourceSpec]:
     tables: set[str] = set()
     for entry in sorted(path.glob("*.yaml")):
         spec = _parse_file(entry)
+        reject_warehouse_table(
+            spec.table,
+            source_id=spec.source_id,
+            routing_path=routing_path,
+            warehouse_path=warehouse_path,
+        )
         if spec.source_id in specs:
             raise ConfigError(f"Duplicate source id: {spec.source_id}")
         if spec.table in tables:
@@ -67,6 +120,20 @@ def load_sources(directory: Path) -> dict[str, SourceSpec]:
         specs[spec.source_id] = spec
         tables.add(spec.table)
     return specs
+
+
+def sources_for_user(specs: Mapping[str, SourceSpec], user: User) -> dict[str, SourceSpec]:
+    """Declarations this user may see. Query permission stays on allowed tables.
+
+    A source is visible when its table is in ``allowed_tables`` or its advisory
+    ``owner_role`` matches the user's role. Other declarations stay hidden.
+    """
+    allowed = set(user.allowed_tables)
+    return {
+        source_id: spec
+        for source_id, spec in specs.items()
+        if spec.table in allowed or spec.owner_role == user.role
+    }
 
 
 def declared_tables(specs: Mapping[str, SourceSpec]) -> set[str]:
@@ -91,14 +158,22 @@ def source_status(spec: SourceSpec | None, metrics_catalogue: list[Metric]) -> s
 
 
 def merge_catalog(catalog: Catalog, specs: Mapping[str, SourceSpec]) -> Catalog:
-    """Add declaration topics after ``load_catalog``. This is the only automatic binding."""
+    """Add declaration topics after ``load_catalog``. This is the only automatic binding.
+
+    A declaration whose table is already in the catalog is left out, so it cannot
+    take the warehouse route.
+    """
     if not specs:
         return catalog
     descriptions = dict(catalog.descriptions)
     topics = list(catalog.topics)
+    occupied = {table for topic in topics for table in topic.tables}
     for spec in specs.values():
+        if spec.table in occupied:
+            continue
         topics.append(_topic(spec))
         descriptions.setdefault(spec.table, spec.description)
+        occupied.add(spec.table)
     return Catalog(topics=tuple(topics), descriptions=descriptions)
 
 
@@ -113,6 +188,25 @@ def _topic(spec: SourceSpec) -> Topic:
         tables=(spec.table,),
         synonyms=tuple(synonyms),
     )
+
+
+def _physical_tables(path: Path) -> set[str]:
+    if not path.is_file():
+        return set()
+    quoted = quote(path.resolve().as_posix(), safe="/")
+    try:
+        conn = sqlite3.connect(f"file:{quoted}?mode=ro", uri=True, timeout=5)
+    except sqlite3.Error:
+        return set()
+    try:
+        rows = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+        )
+        return {str(row[0]) for row in rows}
+    except sqlite3.Error:
+        return set()
+    finally:
+        conn.close()
 
 
 def _parse_file(path: Path) -> SourceSpec:

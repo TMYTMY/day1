@@ -1,36 +1,97 @@
 """Deterministic sample warehouse for the SQLite demo.
 
+The date window is relative. END is the SEED_END environment variable
+(YYYY-MM-DD) when that variable is set, which pins the window, and otherwise
+three days before today. START is 119 days before END, so the window length
+stays fixed. The RNG seed is fixed, and the same SEED_END produces the same
+rows on every run.
+
 Revenue grain: event_date × product × region × channel.
 DAU grain: event_date × platform × country. Countries partition a platform's
-users. The RNG seed is fixed so local results stay stable.
+users.
 
 The revenue load also plants five deterministic defects so the demo is not a
 perfect table: duplicate grain rows, a late backfill, NULL channels, an
 EMEA → E.U. rename, and a stretch of EUR amounts stored in revenue_usd.
+Each defect is an offset from START or END, so it stays inside the window.
 """
 
 from __future__ import annotations
 
+import os
 import random
 import sqlite3
 from datetime import date, timedelta
 from pathlib import Path
 
-SEED_VERSION = "2"
-# Harbor has no August rows in the daily load. They arrive later as one batch.
-_BACKFILL_START = date(2026, 8, 1)
-_BACKFILL_END = date(2026, 8, 31)
-_BACKFILL_LOADED_AT = "2026-09-18"
-# After this date the EMEA region code was renamed in the source system.
-_REGION_RENAME_ON = date(2026, 9, 1)
-# EUR list prices written into revenue_usd with no FX conversion.
-_EUR_START = date(2026, 10, 1)
-_EUR_END = date(2026, 10, 7)
+# Inclusive span is one day longer. (END - START).days stays 119.
+WINDOW_DAYS = 119
 _EUR_LIST_FACTOR = 1.10
-_DUPLICATE_DATES = frozenset({"2026-06-15", "2026-06-16", "2026-06-17"})
-START = date(2026, 6, 15)
-END = date(2026, 10, 12)
-LAUNCH = date(2026, 9, 8)
+
+# Filled by resolve_seed_window(). Importers keep using these names.
+SEED_VERSION = ""
+START = date.min
+END = date.min
+LAUNCH = date.min
+_BACKFILL_START = date.min
+_BACKFILL_END = date.min
+_BACKFILL_LOADED_AT = ""
+_REGION_RENAME_ON = date.min
+_EUR_START = date.min
+_EUR_END = date.min
+_DUPLICATE_DATES: frozenset[str] = frozenset()
+# Harbor partner rows on days strictly before this date have a NULL channel.
+_NULL_CHANNEL_BEFORE = date.min
+
+
+def _month_containing(anchor: date) -> tuple[date, date]:
+    first = date(anchor.year, anchor.month, 1)
+    if anchor.month == 12:
+        next_month = date(anchor.year + 1, 1, 1)
+    else:
+        next_month = date(anchor.year, anchor.month + 1, 1)
+    return first, next_month - timedelta(days=1)
+
+
+def resolve_seed_window(today: date | None = None) -> None:
+    """Resolve START, END, and every defect anchor from SEED_END or today.
+
+    Called once per seed or rebuild. Offsets below match the previous absolute
+    dates when END is 2026-10-12: duplicates on START+0..2, the calendar month
+    containing START+47, NULL channels before START+16, the region rename on
+    START+78, the backfill load on START+95, EUR amounts from END-11 through
+    END-5, and the product launch on START+85.
+    """
+    global SEED_VERSION, START, END, LAUNCH
+    global _BACKFILL_START, _BACKFILL_END, _BACKFILL_LOADED_AT
+    global _REGION_RENAME_ON, _EUR_START, _EUR_END
+    global _DUPLICATE_DATES, _NULL_CHANNEL_BEFORE
+
+    raw = os.environ.get("SEED_END", "").strip()
+    if raw:
+        end = date.fromisoformat(raw)
+    else:
+        end = (today or date.today()) - timedelta(days=3)
+    start = end - timedelta(days=WINDOW_DAYS)
+    backfill_start, backfill_end = _month_containing(start + timedelta(days=47))
+
+    START = start
+    END = end
+    SEED_VERSION = f"3-{end.isoformat()}"
+    LAUNCH = start + timedelta(days=85)
+    _BACKFILL_START = backfill_start
+    _BACKFILL_END = backfill_end
+    _BACKFILL_LOADED_AT = (start + timedelta(days=95)).isoformat()
+    _REGION_RENAME_ON = start + timedelta(days=78)
+    _EUR_START = end - timedelta(days=11)
+    _EUR_END = end - timedelta(days=5)
+    _DUPLICATE_DATES = frozenset(
+        (start + timedelta(days=offset)).isoformat() for offset in (0, 1, 2)
+    )
+    _NULL_CHANNEL_BEFORE = start + timedelta(days=16)
+
+
+resolve_seed_window()
 
 PRODUCTS = ("Atlas", "Northstar", "Harbor")
 REGIONS = ("AMER", "EMEA", "APAC")
@@ -95,7 +156,7 @@ def _apply_revenue_defects(rows: list[tuple]) -> list[tuple]:
         currency = "USD"
         if region == "EMEA" and day >= _REGION_RENAME_ON:
             region = "E.U."
-        if product == "Harbor" and channel == "partner" and day < date(2026, 7, 1):
+        if product == "Harbor" and channel == "partner" and day < _NULL_CHANNEL_BEFORE:
             channel = None
         if _EUR_START <= day <= _EUR_END:
             revenue = round(revenue * _EUR_LIST_FACTOR, 2)
@@ -138,6 +199,7 @@ def _dau_rows(rng: random.Random) -> list[tuple]:
 
 
 def rebuild(path: Path) -> None:
+    resolve_seed_window()
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
         path.unlink()
@@ -217,6 +279,7 @@ def _version(path: Path) -> str | None:
 
 
 def ensure_seeded(path: Path) -> None:
+    resolve_seed_window()
     if _version(path) == SEED_VERSION:
         return
     rebuild(path)

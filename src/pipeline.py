@@ -184,6 +184,8 @@ def _answer_cache_key(
     metric: Metric,
     settings: Settings,
     spec: SourceSpec | None = None,
+    *,
+    data_window: str | None = None,
 ) -> str:
     return metric_cache_key(
         metric,
@@ -191,7 +193,37 @@ def _answer_cache_key(
         prompt_version=PROMPT_VERSION,
         source_id=None if spec is None else spec.source_id,
         source_sha256=None if spec is None else spec.sha256,
+        data_window=data_window,
     )
+
+
+def _data_window(adapter: object, table: str | None) -> str | None:
+    """Newest date the warehouse rows cover, so a re-seed misses the cache.
+
+    The demo warehouse is rebuilt on a moving window (``SEED_END``), so the
+    same question means different rows tomorrow. Returns ``None`` when the
+    table has no ``event_date`` column, which leaves the key unchanged for
+    adapters that are not the seeded demo warehouse.
+    """
+    if not table:
+        return None
+    sql = f'SELECT MAX(event_date) AS as_of FROM "{table}"'
+    try:
+        result = adapter.execute_select(sql, allowed_tables={table}, max_rows=1)
+    except (
+        UnsafeSQLError,
+        QueryExecutionError,
+        sqlite3.Error,
+        OSError,
+        AttributeError,
+        TypeError,
+    ):
+        return None
+    rows = getattr(result, "rows", None) or []
+    if not rows:
+        return None
+    value = rows[0].get("as_of")
+    return None if value is None else str(value)
 
 
 def _dump_answer(answer: Answer) -> str:
@@ -294,6 +326,7 @@ def answer_question(
     selected = None
     declared: SourceSpec | None = None
     active = adapter
+    data_window: str | None = None
     routed_source_id = _routed_source_id(route.tables, sources, catalog, adapter)
 
     def finish(answer: Answer, error: str | None = None) -> Answer:
@@ -339,7 +372,9 @@ def answer_question(
                     selected.id,
                     digest,
                     _dump_answer(answer),
-                    cache_key=_answer_cache_key(selected, settings, declared),
+                    cache_key=_answer_cache_key(
+                        selected, settings, declared, data_window=data_window
+                    ),
                 )
             except (sqlite3.Error, TypeError, ValueError):
                 pass
@@ -391,6 +426,11 @@ def answer_question(
             statement_timeout_ms=settings.sql_timeout_ms,
         )
         active = resolved.adapter
+    else:
+        # The demo warehouse is re-seeded on a moving date window, so the newest
+        # date the rows cover belongs in the cache key (a declared source is
+        # already bound by source_id + sha256).
+        data_window = _data_window(active, table)
     matched = [metric for metric in match_metrics(text, catalogue) if metric.table == table]
     if len(matched) != 1:
         role_titles = [metric.title for metric in active_metrics(catalogue) if metric.table in allowed]
@@ -416,7 +456,9 @@ def answer_question(
             user.role,
             selected.id,
             definition_digest,
-            cache_key=_answer_cache_key(selected, settings, declared),
+            cache_key=_answer_cache_key(
+                selected, settings, declared, data_window=data_window
+            ),
         )
     except sqlite3.Error:
         cached_payload = None

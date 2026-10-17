@@ -1,0 +1,36 @@
+- filename: glossary-finance.md
+  owner_role: finance
+  summary: Booked revenue is the revenue_usd column, and finance owns that definition.
+- filename: finance-close-calendar.md
+  owner_role: finance
+  summary: Five business days of checks before finance will quote a closed month.
+- filename: finance-known-issues.md
+  owner_role: finance
+  summary: Duplicate grain keys, null channels, euro amounts, and the Harbor backfill.
+- filename: finance-revenue-duplicate.md
+  owner_role: finance
+  summary: Finance copy of the revenue column names. This copy wins if the pair disagrees.
+- filename: glossary-growth.md
+  owner_role: growth
+  summary: Activation and daily active users on the dau table, owned by growth.
+- filename: growth-activation-notes.md
+  owner_role: growth
+  summary: Three checks growth runs on the dau table before a campaign brief.
+- filename: growth-known-issues.md
+  owner_role: growth
+  summary: Platform double counting and what growth should not copy from revenue defects.
+- filename: growth-revenue-duplicate.md
+  owner_role: growth
+  summary: Growth copy of the revenue column names. Finance still owns the definition.
+- filename: refresh-runbook.md
+  owner_role: shared
+  summary: Nightly batch for revenue and dau, plus how a labelled backfill lands.
+- filename: onboarding-checklist.md
+  owner_role: shared
+  summary: First-day reading order for a new analyst, split by role.
+- filename: naming-conventions.md
+  owner_role: shared
+  summary: Column names and the allowed product, region, channel, and platform values.
+- filename: known-data-issues.md
+  owner_role: shared
+  summary: Shared list of planted defects in the demo revenue and dau extracts.

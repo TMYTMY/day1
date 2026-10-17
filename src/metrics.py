@@ -217,18 +217,23 @@ def metric_cache_key(
     prompt_version: str,
     source_id: str | None = None,
     source_sha256: str | None = None,
+    data_window: str | None = None,
 ) -> str:
     """12 hex chars covering the metric, the model id, and the prompt version.
 
     Fields are read from the dataclass, so a field added later is part of the
     key without a hand-written list. A declared source also binds ``source_id``
-    and its file sha256, so replacing that file misses the previous answer.
-    Omitting both source fields leaves the key unchanged.
+    and its file sha256, so replacing that file misses the previous answer. The
+    demo warehouse is rebuilt on a moving date window, so ``data_window`` binds
+    the newest date the rows actually cover; omitting every optional field
+    leaves the key unchanged.
     """
     record = {item.name: _cache_value(getattr(metric, item.name)) for item in fields(metric)}
     document: dict[str, object] = {"metric": record, "model": model, "prompt_version": prompt_version}
     if source_id is not None or source_sha256 is not None:
         document["source_id"] = source_id
         document["source_sha256"] = source_sha256
+    if data_window is not None:
+        document["data_window"] = data_window
     encoded = json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:12]

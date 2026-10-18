@@ -158,6 +158,28 @@ Routing stays the default path. A question still has to match the routing map an
 
 The index is a SQLite file plus NumPy cosine search, under `data/knowledge/index.sqlite`. Chroma and FAISS would need a model download or a native library; this demo stays on SQLite so it runs with no extra services. `src/knowledge/store.py` is the place to swap in another engine later. The default embedder hashes tokens on this machine (`EMBEDDING_PROVIDER=local`) and needs no key. Set `EMBEDDING_PROVIDER=openrouter` to call the embeddings endpoint instead. If you change provider or model, re-index existing files so the vectors share one space.
 
+### Measured retrieval
+
+Retrieval is scored against a labelled set, not asserted. `tests/retrieval/corpus/` holds 12 short notes (four finance, four growth, four shared, including a near-duplicate pair across two roles) and `tests/retrieval/labels.yaml` holds 24 questions: 21 with an expected file and 3 that nothing in the corpus answers.
+
+```bash
+python scripts/eval_retrieval.py          # text report
+python scripts/eval_retrieval.py --json   # same numbers for a script
+```
+
+Measured on 2026-10-17 with the default `local-hash-v1` embedder, `k = 4`, over the 21 positively labelled questions:
+
+- **recall@1 = 0.571** (12/21)
+- **recall@4 = 0.857** (18/21)
+- **MRR@4 = 0.687**
+- abstention on the 3 negatives = **1/3**
+
+Read that honestly rather than as a score. The embedder hashes tokens, so it matches wording, not meaning: the two deliberate paraphrases split (one ranked first, one missed) and the misses are vocabulary gaps, not ranking noise. Only one of the three unrelated questions was refused, so `SCORE_MIN` is too permissive for questions the corpus cannot answer — that is the next thing to fix, and the harness is what will show whether a change helps.
+
+The flags are the point: every label ships `reviewed: false`, and the harness prints `N/M labels not human-reviewed — headline number withheld` with exit code 2 and **no figures** until a person has read each question and its expected file. The questions were drafted by an agent and certified by the project owner on 2026-10-17. A negative is scored as abstention and kept out of recall and MRR, because counting a correct abstention as a top-ranked hit would inflate both.
+
+`python scripts/eval_ablation.py` shows the other half: with the same question asked twice, the only difference in the model request is the notes block, and the audit row for each carries its own `knowledge_snippets`. That path runs a scripted reply and labels itself `WIRING ONLY` — identical SQL there proves nothing about model behaviour. `--live` runs the same comparison against the configured model and refuses without a key.
+
 ## Environment
 
 | Variable | Purpose |
@@ -177,6 +199,7 @@ The index is a SQLite file plus NumPy cosine search, under `data/knowledge/index
 | `EMBEDDING_MODEL` | Embedding model id when the provider is `openrouter`. Default `openai/text-embedding-3-small`. |
 | `EMBEDDING_API_KEY` | Key for the embeddings call. Falls back to `OPENROUTER_API_KEY` when the provider is `openrouter`. |
 | `KNOWLEDGE_PATH` | On-disk index directory. Default `data/knowledge`. |
+| `SEED_END` | Last date in the seeded demo window (`YYYY-MM-DD`). Default: three days before today, so the demo data does not age. The window is 119 days long and the file rebuilds when the date changes. |
 
 The API key and database password are read from the environment inside the server process. They are not written into the prompt, the page, or the export.
 
@@ -226,7 +249,7 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-The tests cover routing, the role map, the SELECT allowlist, blocked writes, CSV/HTML export, the revenue, DAU, unknown-topic, and permission paths, and the knowledge base (upload, search, delete, and notes that do not replace routing).
+The tests cover routing, the role map, the SELECT allowlist, blocked writes, CSV/HTML export, the revenue, DAU, unknown-topic, and permission paths, and the knowledge base (upload, search, delete, and notes that do not replace routing). The retrieval harness, the label review gate, the note ablation, the seeded window, and the answer-cache identity have their own tests. Nothing in the suite asserts a retrieval score — the numbers above are measured by the script, so a regression shows up as a number that moved, not as a test that was quietly loosened.
 
 ## Copyright
 

@@ -43,9 +43,23 @@ def test_arithmetic_on_a_synthetic_fixture():
     assert correct_negative["outcome"] == "negative"
     assert correct_negative["hit_at_1"] is True
     assert correct_negative["reciprocal"] == 1.0
-    assert failed_negative["outcome"] == "miss"
+    assert failed_negative["outcome"] == "answered_a_negative"
     assert failed_negative["hit_at_k"] is False
     assert failed_negative["reciprocal"] == 0.0
+
+    # Abstaining is not ranking: a correct negative is reported as abstention
+    # and stays out of recall and MRR, or it would pass for a rank-1 hit.
+    assert correct_negative["scored"] is False
+    assert failed_negative["scored"] is False
+    only_negatives = [correct_negative, failed_negative]
+    try:
+        aggregate(only_negatives)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("aggregate must refuse a list with no positively labelled query")
+    mixed = [*scored, correct_negative, failed_negative]
+    assert aggregate(mixed) == (1 / 3, 2 / 3, (1 + 0.5 + 0) / 3)
 
 
 def test_review_gate_withholds_headline_until_every_label_is_reviewed():
@@ -128,6 +142,10 @@ def test_label_file_matches_the_corpus_index():
     assert {item["owner_role"] for item in pair} == {"finance", "growth"}
 
     assert 20 <= len(LABELS) <= 25
+    # The labels were read question-by-question and certified by a person, so
+    # they count. A draft added later may start unreviewed: that is allowed,
+    # and the evaluator withholds every figure until it is reviewed.
+    assert sum(1 for entry in LABELS if entry["reviewed"]) >= 20
     ids = [entry["id"] for entry in LABELS]
     assert len(ids) == len(set(ids))
     raw = DEFAULT_LABELS.read_text(encoding="utf-8").lower()
@@ -138,7 +156,6 @@ def test_label_file_matches_the_corpus_index():
         assert isinstance(entry["question"], str) and entry["question"]
         assert isinstance(entry["role"], str) and entry["role"]
         assert isinstance(entry["reviewed"], bool)
-        assert entry["reviewed"] is False
         for key in ("recall", "mrr", "accuracy", "precision"):
             assert key not in entry
         expected = entry["expected"]
@@ -167,11 +184,19 @@ def test_evaluator_builds_a_local_store_and_does_not_call_the_network(tmp_path, 
 
     report = run(DEFAULT_LABELS, k=4, store_dir=tmp_path / "run")
     assert report["provider"] == "Local hash"
-    assert report["headline_withheld"] is True
-    assert report["exit_code"] == 2
-    assert "recall_at_1" not in report
+    # Every label is certified, so the headline is reported. The figures are
+    # measured, never asserted to a floor: a test that pinned "recall >= 0.8"
+    # would be an expectation dressed up as a measurement.
+    assert report["headline_withheld"] is False
+    assert report["exit_code"] == 0
+    assert report["positives"] + report["negatives"] == report["total"]
+    assert 0.0 <= report["recall_at_1"] <= 1.0
+    assert 0.0 <= report["recall_at_k"] <= 1.0
+    assert 0.0 <= report["mrr_at_k"] <= 1.0
+    assert report["recall_at_1"] <= report["recall_at_k"]
+    assert 0 <= report["abstained"] <= report["negatives"]
     text = render(report)
-    assert "headline number withheld" in text
-    assert "recall@" not in text
-    assert "MRR" not in text
+    assert "recall@1 = " in text and "MRR@4 = " in text
+    assert f"scored over {report['positives']} positively labelled queries" in text
+    assert "headline number withheld" not in text
     assert Path(str(tmp_path)).exists()

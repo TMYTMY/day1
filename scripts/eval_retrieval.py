@@ -84,18 +84,22 @@ def score_filenames(expected: list[str], filenames: list[str], k: int) -> dict:
     """Score one result list.
 
     `filenames` is the ranked list already limited to hits at or above the
-    store threshold. An empty `expected` list is a negative: it counts only
-    when that list is empty.
+    store threshold. An empty `expected` list is a negative: the right
+    behaviour is abstaining, which is a different question from ranking, so a
+    negative is marked ``"scored": False`` and kept out of recall and MRR. It
+    is reported as abstention instead; counting it as a rank-1 hit would
+    inflate both figures by construction.
     """
     capped = list(filenames)[:k]
     if not expected:
         correct = not capped
         return {
-            "outcome": "negative" if correct else "miss",
+            "outcome": "negative" if correct else "answered_a_negative",
             "rank": None,
             "hit_at_1": correct,
             "hit_at_k": correct,
             "reciprocal": 1.0 if correct else 0.0,
+            "scored": False,
         }
     wanted = set(expected)
     for index, name in enumerate(capped, start=1):
@@ -106,6 +110,7 @@ def score_filenames(expected: list[str], filenames: list[str], k: int) -> dict:
                 "hit_at_1": index == 1,
                 "hit_at_k": True,
                 "reciprocal": 1.0 / index,
+                "scored": True,
             }
     return {
         "outcome": "miss",
@@ -113,14 +118,20 @@ def score_filenames(expected: list[str], filenames: list[str], k: int) -> dict:
         "hit_at_1": False,
         "hit_at_k": False,
         "reciprocal": 0.0,
+        "scored": True,
     }
 
 
 def aggregate(scored: list[dict]) -> tuple[float, float, float]:
-    """Return recall@1, recall@k, and MRR@k for one already-scored list."""
+    """Return recall@1, recall@k, and MRR@k for the positively labelled queries.
+
+    Negatives are excluded: abstaining is measured separately, so a correct
+    abstention cannot pass for a top-ranked hit.
+    """
+    scored = [item for item in scored if item.get("scored", True)]
     total = len(scored)
     if total == 0:
-        raise ValueError("aggregate needs at least one scored query.")
+        raise ValueError("aggregate needs at least one positively labelled query.")
     recall_at_1 = sum(1 for item in scored if item["hit_at_1"]) / total
     recall_at_k = sum(1 for item in scored if item["hit_at_k"]) / total
     mrr_at_k = sum(float(item["reciprocal"]) for item in scored) / total
@@ -150,12 +161,17 @@ def evaluate(entries: list[dict], search, *, k: int, provider: str) -> dict:
     unreviewed = sum(1 for entry in entries if entry["reviewed"] is not True)
     total = len(entries)
     withheld = unreviewed > 0
+    positives = sum(1 for item in scored_entries if item.get("scored", True))
+    negatives = [item for item in scored_entries if not item.get("scored", True)]
     report = {
         "provider": provider,
         "k": k,
         "headline_withheld": withheld,
         "unreviewed": unreviewed,
         "total": total,
+        "positives": positives,
+        "negatives": len(negatives),
+        "abstained": sum(1 for item in negatives if item["outcome"] == "negative"),
         "entries": scored_entries,
         "exit_code": 2 if withheld else 0,
     }
@@ -182,9 +198,17 @@ def render(report: dict) -> str:
         )
     else:
         k = report["k"]
+        lines.append(
+            f"scored over {report['positives']} positively labelled queries "
+            f"(of {report['total']} labels)"
+        )
         lines.append(f"recall@1 = {report['recall_at_1']}")
         lines.append(f"recall@{k} = {report['recall_at_k']}")
         lines.append(f"MRR@{k} = {report['mrr_at_k']}")
+        if report["negatives"]:
+            lines.append(
+                f"abstention on negatives = {report['abstained']}/{report['negatives']}"
+            )
     return "\n".join(lines)
 
 
@@ -195,12 +219,16 @@ def to_json(report: dict) -> dict:
         "headline_withheld": report["headline_withheld"],
         "unreviewed": report["unreviewed"],
         "total": report["total"],
+        "positives": report["positives"],
+        "negatives": report["negatives"],
+        "abstained": report["abstained"],
         "entries": [
             {"id": entry["id"], "outcome": entry["outcome"], "rank": entry["rank"]}
             for entry in report["entries"]
         ],
     }
     if not report["headline_withheld"]:
+        payload["positives_only"] = True
         payload["recall_at_1"] = report["recall_at_1"]
         payload["recall_at_k"] = report["recall_at_k"]
         payload["mrr_at_k"] = report["mrr_at_k"]

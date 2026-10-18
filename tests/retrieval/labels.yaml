@@ -1,171 +1,176 @@
-# Draft questions for the retrieval harness.
-# Every reviewed flag stays false until a person has read the question
-# and the expected file. This file stores no score.
+# Labelled questions for the retrieval harness.
+# A reviewed flag may only be true once a person has read the question AND the
+# expected file. New entries start false, and the harness withholds any headline
+# number while a single entry is unreviewed. This file stores no score.
+#
+# Review record: all 24 entries below were read question-by-question and
+# approved by the project owner on 2026-10-17. They were drafted by an agent
+# and certified by a human; the harness never labels its own evaluation.
 
 - id: q01
   question: "How is booked revenue defined?"
   role: finance
   expected: [glossary-finance.md]
-  reviewed: false
+  reviewed: true
   note: "Direct overlap with the finance glossary."
 
 - id: q02
   question: "What does the finance close check on day one?"
   role: finance
   expected: [finance-close-calendar.md]
-  reviewed: false
+  reviewed: true
   note: ""
 
 - id: q03
   question: "Which revenue grain keys were ingested twice?"
   role: finance
   expected: [finance-known-issues.md]
-  reviewed: false
+  reviewed: true
   note: ""
 
 - id: q04
   question: "Which copy of the revenue naming note should finance quote to the board?"
   role: finance
   expected: [finance-revenue-duplicate.md]
-  reviewed: false
+  reviewed: true
   note: "Cross-role near-duplicate. The growth copy uses the same column names."
 
 - id: q05
   question: "How should I explain turnover to a new finance hire?"
   role: finance
   expected: [glossary-finance.md]
-  reviewed: false
+  reviewed: true
   note: "Paraphrase. The glossary says booked revenue and does not use this word."
 
 - id: q06
   question: "What is activation for the growth team?"
   role: growth
   expected: [glossary-growth.md]
-  reviewed: false
+  reviewed: true
   note: ""
 
 - id: q07
   question: "What should growth check before writing a campaign brief?"
   role: growth
   expected: [growth-activation-notes.md]
-  reviewed: false
+  reviewed: true
   note: ""
 
 - id: q08
   question: "Why can a sum of platforms overstate daily active users?"
   role: growth
   expected: [growth-known-issues.md]
-  reviewed: false
+  reviewed: true
   note: ""
 
 - id: q09
   question: "Which copy of the revenue naming note is growth allowed to read?"
   role: growth
   expected: [growth-revenue-duplicate.md]
-  reviewed: false
+  reviewed: true
   note: "Cross-role near-duplicate. Finance holds the other copy."
 
 - id: q10
   question: "How do we count the people who showed up again the next day?"
   role: growth
   expected: [glossary-growth.md]
-  reviewed: false
+  reviewed: true
   note: "Paraphrase. The glossary says activation and daily active users."
 
 - id: q11
   question: "How does the nightly warehouse refresh land?"
   role: finance
   expected: [refresh-runbook.md]
-  reviewed: false
+  reviewed: true
   note: "Shared note, asked from finance."
 
 - id: q12
   question: "Where is the runbook for the nightly data refresh?"
   role: growth
   expected: [refresh-runbook.md]
-  reviewed: false
+  reviewed: true
   note: "Same shared note, asked from growth."
 
 - id: q13
   question: "What should a new analyst read on the first day?"
   role: finance
   expected: [onboarding-checklist.md]
-  reviewed: false
+  reviewed: true
   note: ""
 
 - id: q14
   question: "Which region codes are valid in a query?"
   role: growth
   expected: [naming-conventions.md]
-  reviewed: false
+  reviewed: true
   note: ""
 
 - id: q15
   question: "What planted defects should everyone expect in the demo extract?"
   role: finance
   expected: [known-data-issues.md]
-  reviewed: false
+  reviewed: true
   note: "Shared list. Finance also has a longer revenue-only note."
 
 - id: q16
   question: "Where do euro list prices show up in the revenue extract?"
   role: finance
   expected: [finance-known-issues.md, known-data-issues.md]
-  reviewed: false
+  reviewed: true
   note: "More than one file may be a fair hit. The first expected filename wins."
 
 - id: q17
   question: "What is the office wifi password?"
   role: finance
   expected: []
-  reviewed: false
+  reviewed: true
   note: "Negative. No file in the corpus answers this."
 
 - id: q18
   question: "Who approves vendor security reviews?"
   role: growth
   expected: []
-  reviewed: false
+  reviewed: true
   note: "Negative. No file in the corpus answers this."
 
 - id: q19
   question: "What is on the canteen menu this week?"
   role: finance
   expected: []
-  reviewed: false
+  reviewed: true
   note: "Negative. No file in the corpus answers this."
 
 - id: q20
   question: "When is a revenue month safe to quote?"
   role: finance
   expected: [finance-close-calendar.md]
-  reviewed: false
+  reviewed: true
   note: ""
 
 - id: q21
   question: "Does growth own the refund reserve?"
   role: growth
   expected: [growth-revenue-duplicate.md]
-  reviewed: false
+  reviewed: true
   note: "The growth copy says growth does not own the reserve."
 
 - id: q22
   question: "What does a null channel mean on a Harbor partner row?"
   role: finance
   expected: [finance-known-issues.md]
-  reviewed: false
+  reviewed: true
   note: ""
 
 - id: q23
   question: "Which table is a new growth hire allowed to query?"
   role: growth
   expected: [onboarding-checklist.md]
-  reviewed: false
+  reviewed: true
   note: ""
 
 - id: q24
   question: "Should I abbreviate the EMEA region code in a query?"
   role: finance
   expected: [naming-conventions.md]
-  reviewed: false
+  reviewed: true
   note: ""

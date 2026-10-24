@@ -1,4 +1,4 @@
-"""Fieldnote chat UI.
+"""Day 1 chat UI.
 
 Session expiry is evaluated on user interaction only. Streamlit is request
 driven, so an idle browser tab keeps its server-side session until the next event.
@@ -41,13 +41,13 @@ from src.sources import (
     sources_for_user,
 )
 
-logger = logging.getLogger("fieldnote")
+logger = logging.getLogger("day1")
 
 PREVIEW_ROWS = 100
 IDLE_TIMEOUT_SECONDS = 1800
 MAX_LOGIN_FAILURES = 5
 LOGIN_WINDOW_SECONDS = 300
-SOURCE_URL = "https://github.com/TMYTMY/steamlit-llm"
+SOURCE_URL = "https://github.com/TMYTMY/day1"
 SUGGESTIONS = (
     ("revenue", "What was total revenue by product over the last 90 days?"),
     ("revenue", "Show the daily revenue trend for the last 30 days"),
@@ -64,7 +64,7 @@ def _css() -> None:
         """
         <style>
           .block-container { max-width: 1080px; padding-top: 1.4rem; }
-          .fn-kicker {
+          .d1-kicker {
             letter-spacing: 0.14em;
             text-transform: uppercase;
             font-size: 0.75rem;
@@ -134,7 +134,7 @@ def _source_link() -> None:
 def _render_login(settings: Settings, audit: AuditLog) -> None:
     with st.sidebar:
         _source_link()
-    st.markdown('<p class="fn-kicker">Fieldnote</p>', unsafe_allow_html=True)
+    st.markdown('<p class="d1-kicker">Day 1</p>', unsafe_allow_html=True)
     st.title("Ask the warehouse")
     st.caption(
         "Revenue and daily active users, answered with read-only SQL. "
@@ -381,7 +381,7 @@ def _run_turn(
 
 def _sidebar(user: User, settings: Settings, adapter: object, audit: AuditLog) -> None:
     with st.sidebar:
-        st.markdown('<p class="fn-kicker">Signed in</p>', unsafe_allow_html=True)
+        st.markdown('<p class="d1-kicker">Signed in</p>', unsafe_allow_html=True)
         st.subheader(user.username)
         st.caption(f"Role · {user.role}")
         st.markdown("**Tables**")
@@ -531,13 +531,13 @@ def _source_rows(
 
 def _render_sources_page(user: User, settings: Settings, sources: dict[str, SourceSpec]) -> None:
     with st.sidebar:
-        st.markdown('<p class="fn-kicker">Signed in</p>', unsafe_allow_html=True)
+        st.markdown('<p class="d1-kicker">Signed in</p>', unsafe_allow_html=True)
         st.subheader(user.username)
         st.caption(f"Role · {user.role}")
         if st.button("Sign out", key="sign_out_sources", width="stretch"):
             _sign_out()
         _source_link()
-    st.markdown('<p class="fn-kicker">Data sources</p>', unsafe_allow_html=True)
+    st.markdown('<p class="d1-kicker">Data sources</p>', unsafe_allow_html=True)
     st.title("Data sources")
     visible = sources_for_user(sources, user)
     st.caption(_capability_line(visible))
@@ -616,7 +616,7 @@ def _consume_pending(
 
 
 def main() -> None:
-    st.set_page_config(page_title="Fieldnote", page_icon="📗", layout="wide")
+    st.set_page_config(page_title="Day 1", page_icon="📗", layout="wide")
     _css()
     _init_state()
     try:
@@ -632,7 +632,7 @@ def main() -> None:
         )
         knowledge = KnowledgeStore(settings)
     except (ConfigError, OSError) as exc:
-        st.title("Fieldnote")
+        st.title("Day 1")
         st.error(str(exc))
         return
 
@@ -654,7 +654,7 @@ def main() -> None:
     page = _page_choice()
     if page == "knowledge":
         with st.sidebar:
-            st.markdown('<p class="fn-kicker">Signed in</p>', unsafe_allow_html=True)
+            st.markdown('<p class="d1-kicker">Signed in</p>', unsafe_allow_html=True)
             st.subheader(user.username)
             st.caption(f"Role · {user.role}")
             if st.button("Sign out", key="sign_out", width="stretch"):
@@ -666,8 +666,8 @@ def main() -> None:
         _render_sources_page(user, settings, sources)
         return
 
-    st.markdown('<p class="fn-kicker">Warehouse Q&A</p>', unsafe_allow_html=True)
-    st.title("Fieldnote")
+    st.markdown('<p class="d1-kicker">Warehouse Q&A</p>', unsafe_allow_html=True)
+    st.title("Day 1")
     st.caption(
         "Ask in English or Cantonese. The routing map picks a table, "
         "then a read-only query runs on the columns your role can access. "

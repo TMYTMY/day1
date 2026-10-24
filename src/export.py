@@ -29,7 +29,7 @@ def result_filename(tables: list[str] | tuple[str, ...], extension: str, stamp: 
     slug = "-".join(tables) if tables else "result"
     slug = re.sub(r"[^a-z0-9-]+", "", slug.lower()) or "result"
     compact = re.sub(r"[^0-9]", "", stamp)[:14] or "export"
-    return f"fieldnote-{slug}-{compact}.{extension}"
+    return f"day1-{slug}-{compact}.{extension}"
 
 
 def _csv_cell(value: object) -> str:
@@ -73,7 +73,7 @@ def to_html(
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Fieldnote result</title>
+<title>Day 1 result</title>
 <style>
   body {{ margin: 40px; color: #1c2421; font-family: Georgia, "Times New Roman", serif; }}
   h1 {{ font-weight: 500; font-size: 1.6rem; margin-bottom: 0.2rem; }}
@@ -85,7 +85,7 @@ def to_html(
 </style>
 </head>
 <body>
-<p>Fieldnote</p>
+<p>Day 1</p>
 <h1>{escape(meta.question)}</h1>
 <p>{escape(meta.generated_at)} · {escape(meta.username)} · tables {escape(", ".join(meta.tables) or "none")}</p>
 <p>{assumption}</p>

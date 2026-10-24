@@ -11,7 +11,7 @@ from src.models import User
 
 def render_knowledge_page(store: KnowledgeStore, settings: Settings, user: User) -> None:
     notice = st.session_state.pop("kb_notice", None)
-    st.markdown('<p class="fn-kicker">Knowledge Base</p>', unsafe_allow_html=True)
+    st.markdown('<p class="d1-kicker">Knowledge Base</p>', unsafe_allow_html=True)
     st.title("知識庫")
     st.caption(
         "Drop schema docs, DDL, a business glossary, or a synonym list. "

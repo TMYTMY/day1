@@ -148,7 +148,7 @@ class Embedder:
         headers = {
             "Authorization": f"Bearer {key}",
             "Content-Type": "application/json",
-            "X-Title": "Fieldnote",
+            "X-Title": "Day 1",
         }
         resolved: list[np.ndarray | None] = [None] * len(texts)
         missing: list[int] = []

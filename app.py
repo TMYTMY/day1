@@ -1,4 +1,4 @@
-"""Day 1 chat UI.
+"""Day1 chat UI.
 
 Session expiry is evaluated on user interaction only. Streamlit is request
 driven, so an idle browser tab keeps its server-side session until the next event.
@@ -41,7 +41,7 @@ from src.sources import (
     sources_for_user,
 )
 
-logger = logging.getLogger("day1")
+logger = logging.getLogger("fieldnote")
 
 PREVIEW_ROWS = 100
 IDLE_TIMEOUT_SECONDS = 1800
@@ -134,7 +134,7 @@ def _source_link() -> None:
 def _render_login(settings: Settings, audit: AuditLog) -> None:
     with st.sidebar:
         _source_link()
-    st.markdown('<p class="d1-kicker">Day 1</p>', unsafe_allow_html=True)
+    st.markdown('<p class="d1-kicker">Day1</p>', unsafe_allow_html=True)
     st.title("Ask the warehouse")
     st.caption(
         "Revenue and daily active users, answered with read-only SQL. "
@@ -616,7 +616,7 @@ def _consume_pending(
 
 
 def main() -> None:
-    st.set_page_config(page_title="Day 1", page_icon="📗", layout="wide")
+    st.set_page_config(page_title="Day1", page_icon="📗", layout="wide")
     _css()
     _init_state()
     try:
@@ -632,7 +632,7 @@ def main() -> None:
         )
         knowledge = KnowledgeStore(settings)
     except (ConfigError, OSError) as exc:
-        st.title("Day 1")
+        st.title("Day1")
         st.error(str(exc))
         return
 
@@ -667,7 +667,7 @@ def main() -> None:
         return
 
     st.markdown('<p class="d1-kicker">Warehouse Q&A</p>', unsafe_allow_html=True)
-    st.title("Day 1")
+    st.title("Day1")
     st.caption(
         "Ask in English or Cantonese. The routing map picks a table, "
         "then a read-only query runs on the columns your role can access. "

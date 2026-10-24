@@ -73,7 +73,7 @@ def to_html(
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Day 1 result</title>
+<title>Day1 result</title>
 <style>
   body {{ margin: 40px; color: #1c2421; font-family: Georgia, "Times New Roman", serif; }}
   h1 {{ font-weight: 500; font-size: 1.6rem; margin-bottom: 0.2rem; }}
@@ -85,7 +85,7 @@ def to_html(
 </style>
 </head>
 <body>
-<p>Day 1</p>
+<p>Day1</p>
 <h1>{escape(meta.question)}</h1>
 <p>{escape(meta.generated_at)} · {escape(meta.username)} · tables {escape(", ".join(meta.tables) or "none")}</p>
 <p>{assumption}</p>

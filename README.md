@@ -1,6 +1,6 @@
-# Day 1
+# Day1
 
-Day 1 is a warehouse Q&A tool for people who should get an answer without a database login. A model that writes SQL can be talked into the wrong table or into more than one statement, so the tool exists to keep each answer on a single table the role is allowed to read, and to run that query on a connection that cannot write.
+Day1 is a warehouse Q&A tool for people who should get an answer without a database login. A model that writes SQL can be talked into the wrong table or into more than one statement, so the tool exists to keep each answer on a single table the role is allowed to read, and to run that query on a connection that cannot write.
 
 ## 我實測過嘅攻擊
 

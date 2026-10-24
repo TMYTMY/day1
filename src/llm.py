@@ -44,7 +44,7 @@ class LlmClient:
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
-            "X-Title": "Day 1",
+            "X-Title": "Day1",
         }
         payload = {
             "model": self.model,

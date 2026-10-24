@@ -2,7 +2,7 @@
 
 ## Context
 
-Day 1 lets a person ask a business question and get a table back. The SQL is written by a language model, or by a local planner when no key is set. Either writer can be pointed at the wrong table, at more than one statement, or at a function that reads a file. A read-only database role stops some of that after the statement arrives. It does not decide which table the question was supposed to use, and it does not tell the caller why the statement was refused.
+Day1 lets a person ask a business question and get a table back. The SQL is written by a language model, or by a local planner when no key is set. Either writer can be pointed at the wrong table, at more than one statement, or at a function that reads a file. A read-only database role stops some of that after the statement arrives. It does not decide which table the question was supposed to use, and it does not tell the caller why the statement was refused.
 
 ## Decision
 

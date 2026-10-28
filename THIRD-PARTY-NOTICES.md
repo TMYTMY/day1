@@ -52,3 +52,10 @@ Copyright 2019 Kenneth Reitz
 
 - License: MIT
 - Copyright: Copyright (c) 2010 openpyxl
+
+## cryptography 50.0.2
+
+- License: Apache-2.0 OR BSD-3-Clause
+- Copyright: Copyright (c) Individual contributors.
+
+No NOTICE file in the installed distribution.

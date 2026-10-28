@@ -43,7 +43,7 @@ from typing import TYPE_CHECKING, Protocol
 from src.alerts import AlertDefinition
 from src.alert_eval import BELOW_ABSOLUTE, CHANGE_PCT_DOWN, CHANGE_PCT_UP
 from src.auth import user_named
-from src.capabilities import ALERT, authorize, join_names
+from src.capabilities import ALERT, QUERY, authorize, join_names
 from src.config import ConfigError, Settings
 from src.metrics import Metric
 from src.models import User
@@ -292,12 +292,20 @@ def condition_phrase(comparison: str, constant: float) -> str:
     """The condition in words, with the raw kind and constant kept beside it."""
     word = _CONDITION_WORDS.get(comparison, comparison)
     if comparison in (CHANGE_PCT_DOWN, CHANGE_PCT_UP):
-        return f"{word} {constant:g}% or more on the previous window"
-    return f"{word} {constant:g}"
+        return f"{word} {_constant(constant)}% or more on the previous window"
+    return f"{word} {_constant(constant)}"
 
 
 def _number(value: float | None) -> str:
     return "no rows" if value is None else f"{value:,.2f}"
+
+
+def _constant(value: float) -> str:
+    """A threshold, written the way a person writes it: 100,000, not 1e+05."""
+    rounded = round(float(value), 2)
+    if rounded == int(rounded):
+        return f"{int(rounded):,}"
+    return f"{rounded:,.2f}".rstrip("0").rstrip(".")
 
 
 def compose(outcome: FireOutcome, metric: Metric) -> Notification:
@@ -322,7 +330,7 @@ def compose(outcome: FireOutcome, metric: Metric) -> Notification:
         "",
         f"Value: {_number(outcome.value)}",
         f"Window: {window}",
-        f"Condition: {definition.comparison} {definition.constant:g} "
+        f"Condition: {definition.comparison} {_constant(definition.constant)} "
         f"(value {condition_phrase(definition.comparison, definition.constant)})",
     ]
     if outcome.previous is not None:
@@ -344,8 +352,8 @@ def compose(outcome: FireOutcome, metric: Metric) -> Notification:
         "evaluation, the statement it ran, and the recipients this notification "
         "reached.",
         "",
-        "You receive this because you hold the alert capability and may read this "
-        "metric's table. Both were checked when this fire ran.",
+        "You receive this because you may read this metric. That read grant was "
+        "checked when this fire ran, not when the alert was set.",
     ]
     subject = (
         f"[Day 1] {title} fired: {_number(outcome.value)} over "
@@ -535,9 +543,10 @@ class Notifier:
 
         The definition stored a recipient *name*. What that name may read is
         decided by the directory as it stands at fire time, through the same
-        ``authorize`` boundary the rest of the app uses: the alert capability
-        and the metric's table, both, for each person separately. One person's
-        lost grant does not silence the others.
+        ``authorize`` boundary the rest of the app uses. Receiving a number is
+        a READ, so the check is the query capability plus the metric's table —
+        not the alert capability, which governs who may create a definition.
+        One person's lost grant does not silence the others.
         """
         permitted: list[User] = []
         blocked: list[Blocked] = []
@@ -552,7 +561,7 @@ class Notifier:
                     )
                 )
                 continue
-            decision = authorize(user, ALERT, (metric.table,), display=self._titles or None)
+            decision = authorize(user, QUERY, (metric.table,), display=self._titles or None)
             if not decision.allowed:
                 blocked.append(
                     Blocked(

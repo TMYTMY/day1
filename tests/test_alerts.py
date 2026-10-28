@@ -510,12 +510,16 @@ def test_a_recipient_who_cannot_read_the_metric_is_refused(instance):
     assert instance.service.definitions() == []
 
 
-def test_a_recipient_without_the_alert_capability_is_refused(instance):
+def test_a_read_only_role_may_still_receive_an_alert(instance):
+    """Receiving a number is a read, so the alert capability is not required.
+
+    finn is in the finance role: he may read revenue and nothing else. Refusing
+    him as a recipient would make the useful case impossible — the person who
+    owns the number is exactly the person who does not create definitions.
+    """
     result = _draft(instance.service, instance.alex, recipients=["finn"])
-    assert result.ok is False
-    assert result.field == "recipient"
-    assert result.reason == "recipient_no_capability"
-    assert "finn" in result.message and "alert capability" in result.message
+    assert result.ok is True
+    assert result.definition.recipients == ("finn",)
 
 
 def test_an_unknown_recipient_is_refused(instance):

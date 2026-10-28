@@ -66,18 +66,42 @@ def _write_users(tmp_path, body: str):
 # --- configuration: capability grants are additive -------------------------
 
 
-def test_the_owner_role_holds_admin_and_reads_no_tables():
-    """The demo owner can reach Settings. Administering is not reading data."""
+def test_the_owner_role_holds_admin_and_reads_no_tables(tmp_path):
+    """Administering is not reading data, and the admin account has no password.
+
+    Direction change from the Settings ticket. This test used to assert that the
+    shipped ``owner / owner`` credential signed in. That credential is gone: a
+    password that grants ``admin`` and ships in the repository is a decorative
+    gate, because anyone on the LAN can read the same file. The account now
+    proves itself with a secret the host generates, whose salted hash lives in
+    the instance settings database and whose plaintext is printed once.
+    """
     from src.capabilities import ADMIN
+    from src.operator_secret import store_secret
 
     directory = load_directory(USERS)
     assert directory.roles["owner"] == ()
     assert directory.capabilities["owner"] == (ADMIN,)
-    owner = authenticate("owner", "owner", USERS)
+
+    # Nothing in the file opens the admin account any more.
+    assert authenticate("owner", "owner", USERS) is None
+    assert authenticate("owner", "", USERS) is None
+
+    # With no instance to check against there is nothing to verify, so the
+    # account is refused rather than guessed at.
+    instance = tmp_path / "instance.db"
+    assert authenticate("owner", "any-secret", USERS, settings_path=instance) is None
+
+    store_secret(instance, "a-host-generated-secret")
+    owner = authenticate(
+        "owner", "a-host-generated-secret", USERS, settings_path=instance
+    )
     assert owner is not None
     assert owner.allowed_tables == ()
     assert owner.capabilities == (ADMIN,)
     assert authorize(owner, ADMIN).allowed is True
+    assert authenticate("owner", "wrong-secret", USERS, settings_path=instance) is None
+
     analyst = authenticate("analyst", "analyst", USERS)
     assert analyst is not None
     refused = authorize(analyst, ADMIN)

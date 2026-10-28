@@ -48,7 +48,14 @@ from src.alert_eval import (
 )
 from src.audit import AuditLog
 from src.auth import user_named
-from src.capabilities import ALERT, CAPABILITY_NOT_GRANTED, QUERY, TABLE_NOT_ALLOWED, authorize
+from src.capabilities import (
+    ADMIN,
+    ALERT,
+    CAPABILITY_NOT_GRANTED,
+    QUERY,
+    TABLE_NOT_ALLOWED,
+    authorize,
+)
 from src.config import Settings
 from src.metrics import Metric, definition_hash, is_placeholder, load_metrics, measure_column
 from src.models import User
@@ -357,6 +364,34 @@ def _row_to_definition(row: sqlite3.Row) -> AlertDefinition:
 
 
 # --- the service ----------------------------------------------------------
+
+
+def may_operate(record: AlertDefinition, actor: User) -> bool:
+    """Whether ``actor`` may pause, resume or run this definition.
+
+    Two people may, and the answer lives here so the page and the service
+    cannot disagree about it:
+
+    * the definition's own owner, who confirmed it and keeps their rights; and
+    * the instance operator — the role holding ``admin``, which is the account
+      that proves shell access to the box.
+
+    Before this, only the owner could act and only the ``analyst`` role held
+    ``alert`` while only ``owner`` held ``admin``, so the person who could open
+    the page could never operate anything on it. An operator acting on
+    somebody else's definition is recorded as an operator action naming the
+    owner, not silently as if the owner had done it.
+    """
+    if record.owner == actor.username:
+        return True
+    return authorize(actor, ADMIN).allowed
+
+
+def operator_note(record: AlertDefinition, actor: User) -> str:
+    """The audit suffix for an operator acting on another person's definition."""
+    if record.owner == actor.username:
+        return ""
+    return f", operator=true, owner={record.owner}"
 
 
 class AlertService:
@@ -673,7 +708,7 @@ class AlertService:
                 message=f"Alert definition #{alert_id} does not exist.",
                 metric=None,
             )
-        if record.owner != actor.username:
+        if not may_operate(record, actor):
             return self._refuse(
                 user=actor,
                 action="pause",
@@ -707,18 +742,21 @@ class AlertService:
             action=f"pause alert definition #{alert_id}",
             metric=self._metric(record.metric_id),
             error=None,
-            extra="state=paused",
+            extra="state=paused" + operator_note(record, actor),
+            capability=ALERT if record.owner == actor.username else ADMIN,
         )
         message = (
             f"Alert definition #{alert_id} is paused. It stays in the audit trail and is "
             "no longer evaluated."
         )
+        if record.owner != actor.username:
+            message = f"{message} You acted as the instance operator on {record.owner}'s definition."
         if not audited:
             message = f"{message} The usage log could not be written."
         return AlertResult(ok=True, message=message, definition=self.store.get(alert_id), audited=audited)
 
     def resume(self, alert_id: int, actor: User) -> AlertResult:
-        """Make a paused definition live again. Only its owner may do it."""
+        """Make a paused definition live again. Its owner or the operator may do it."""
         record = self.store.get(alert_id)
         if record is None:
             return self._refuse(
@@ -729,7 +767,7 @@ class AlertService:
                 message=f"Alert definition #{alert_id} does not exist.",
                 metric=None,
             )
-        if record.owner != actor.username:
+        if not may_operate(record, actor):
             return self._refuse(
                 user=actor,
                 action="resume",
@@ -763,9 +801,12 @@ class AlertService:
             action=f"resume alert definition #{alert_id}",
             metric=self._metric(record.metric_id),
             error=None,
-            extra="state=confirmed",
+            extra="state=confirmed" + operator_note(record, actor),
+            capability=ALERT if record.owner == actor.username else ADMIN,
         )
         message = f"Alert definition #{alert_id} is live again."
+        if record.owner != actor.username:
+            message = f"{message} You acted as the instance operator on {record.owner}'s definition."
         if not audited:
             message = f"{message} The usage log could not be written."
         return AlertResult(ok=True, message=message, definition=self.store.get(alert_id), audited=audited)
@@ -1068,15 +1109,22 @@ class AlertService:
         metric: Metric | None,
         error: str | None,
         extra: str,
+        capability: str = ALERT,
     ) -> bool:
-        """One row per attempt through the shared writer, capability ``alert``."""
+        """One row per attempt through the shared writer.
+
+        The capability is ``alert`` for a person acting on their own
+        definition, and ``admin`` when the instance operator acts on somebody
+        else's: the audit trail has to say which grant the action was taken
+        under, not only who took it.
+        """
         try:
             self.audit.record_event(
                 username=user.username,
                 role=user.role,
                 status=status,
                 event_type=event_type,
-                capability=ALERT,
+                capability=capability,
                 question=f"{action} ({extra})",
                 tables=(metric.table,) if metric is not None else (),
                 error=error,

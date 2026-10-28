@@ -148,9 +148,9 @@ def test_login_locks_out_after_five_failed_attempts(monkeypatch, tmp_path):
     calls = {"n": 0}
     original = auth_module.authenticate
 
-    def counting(username, password, path):
+    def counting(username, password, path, **kwargs):
         calls["n"] += 1
-        return original(username, password, path)
+        return original(username, password, path, **kwargs)
 
     monkeypatch.setattr("src.auth.authenticate", counting)
     at = AppTest.from_file(str(ROOT / "app.py"), default_timeout=60).run(timeout=60)

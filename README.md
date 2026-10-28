@@ -136,11 +136,37 @@ The proxy terminates TLS and decides who may connect. The app keeps its role che
 | analyst | analyst | analyst | revenue, dau | query, alert |
 | finance | finance | finance | revenue | query |
 | growth | growth | growth | dau | query |
-| owner | owner | owner | (none) | admin |
+| owner | (none — operator secret) | owner | (none) | admin |
 
 A role holds two grants. The table grant says what an action may read; the capability grant says which actions the role may run (`query` answers a question, `alert` drafts and confirms an alert definition, `admin` opens Settings). Both are checked at one boundary in `src/capabilities.py`, and neither replaces the other: a role with `query` but no matching table is refused, and a role with the table but no `query` is refused before routing. A role with no `capabilities` key implies `[query]`, so an older `users.yaml` keeps working. See `docs/migration/0001-capability-grants.md`. Refusals name the capability or the table and the role, and are appended to the audit log like any other outcome.
 
-The owner role is the demo account for Settings. Its table list is empty: administering the instance is not reading its data. Day 1 still signs in with a demo password. Settings is not a substitute for authentication on an instance exposed to the public.
+The owner role opens Settings. Its table list is empty: administering the instance is not reading its data.
+
+### The operator secret
+
+There is no documented `admin` password. A credential that grants `admin` and ships in this repository is a decorative gate: anyone who can read the file can sign in, repoint the SMTP host, and have the stored mailbox password presented to a server of their choosing — never seeing the secret, and never needing to. So the `owner` account has **no password at all**. It proves itself with a secret generated on the machine that runs the instance:
+
+```bash
+python -m src.operator_secret --init      # generate; prints the secret once
+python -m src.operator_secret --status    # is a secret set, and when
+python -m src.operator_secret --init --force   # rotate: the old secret stops working
+```
+
+`--init` prints the secret once and stores only a salted `scrypt` hash, in a table of its own in the instance settings database (`SETTINGS_PATH`). The plaintext is not recoverable: a lost secret is rotated, not recovered. Holding it proves shell access to the box, which is the real trust boundary for an on-prem instance — whoever can read `.env` and the settings database already owns the instance. `--init` refuses to replace an existing secret without `--force`, so a rotation is a deliberate act, and it never touches a mail setting.
+
+The same secret is asked for **again** in the page before every save, test send and clear: signing in proves who opened the session, and typing the secret proves the operator is the person at the keyboard right now, so a session left unlocked at an unattended browser cannot repoint the sender.
+
+### Browser settings are off by default
+
+The Mail settings write surface is off unless the instance was started with:
+
+```bash
+DAY1_ALLOW_BROWSER_SETTINGS=1
+```
+
+Off is the default, and the page says so in one line and names the flag. Repointing the sender is not an ordinary settings change — with a working mailbox and correct SPF/DKIM it is internal phishing infrastructure, and silencing a governance product's alerts is itself the attack — so it is a decision an operator makes, not something a page offers.
+
+Day 1 still signs in with a demo password. Settings is not a substitute for authentication on an instance exposed to the public.
 
 ## Try these
 
@@ -278,12 +304,32 @@ STARTTLS off). The two are alternatives, and the settings layer refuses to have
 both.
 
 The same presets are on **Mail settings** in the sidebar, and **Alerts** lists
-every definition. Both pages require the `admin` capability (the demo `owner`
-account). The page writes the encrypted settings database; a value there wins
-over this file, and a blank password keeps the stored one. `python -m src.mail_setup --init-key`
-creates `DAY1_SECRET_KEY` when `.env` does not already hold one. Day 1 still
-signs in with a demo password. Settings is not a substitute for authentication
-on an instance exposed to the public.
+every definition. Both pages require the `admin` capability, which in the
+shipped directory is the `owner` account — and that account has no password:
+it signs in with the host-generated operator secret (see **Sign in**). Saves,
+test sends and clears ask for that secret again, and the write surface is off
+until the instance is started with `DAY1_ALLOW_BROWSER_SETTINGS=1`. The page
+writes the encrypted settings database; a value there wins over this file, and
+a blank password keeps the stored one. `python -m src.mail_setup --init-key`
+creates `DAY1_SECRET_KEY` when `.env` does not already hold one.
+
+Every page action writes exactly one audit event: `mail_settings_updated` (the
+field names, never the values), `mail_settings_cleared`, `mail_test_sent` (the
+recipient and the outcome), `alert_paused`, `alert_resumed`, `alert_run_now`,
+or `settings_refused` for a refusal, a missing key, or a store that would not
+take the write. The `Alerts` list shows a definition's metric, condition and
+last fire only to a person who could get an answer about that table: for
+anyone else the row keeps its state and its id and says the metric is outside
+their role.
+
+Pause, resume and run-now work for the definition's owner, and for the
+instance operator — the `admin` role — on anybody's definition. An operator
+action is audited as one: the row carries `capability=admin` and names the
+owner it acted on, so a definition somebody else switched off is never
+recorded as if its owner had done it.
+
+Day 1 still signs in with a demo password. Settings is not a substitute for
+authentication on an instance exposed to the public.
 
 ## Alerts: the worker
 

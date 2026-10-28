@@ -168,7 +168,9 @@ def _sign_in(name: str, settings: Settings) -> User:
                 reason="password_missing",
             )
         password = getpass.getpass(f"Password for {name}: ")
-    user = authenticate(name, password, settings.users_path)
+    user = authenticate(
+        name, password, settings.users_path, settings_path=settings.settings_path
+    )
     if user is None:
         raise CliRefusal(
             f"The actor {name} is not in the user directory, or the password does not match.",

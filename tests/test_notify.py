@@ -9,6 +9,8 @@ that connects early is an assertion error rather than a hanging test.
 
 from __future__ import annotations
 
+import smtplib
+import ssl
 from dataclasses import replace
 from datetime import date
 from pathlib import Path
@@ -351,8 +353,8 @@ def test_the_smtp_sender_upgrades_the_connection_logs_in_and_sends(monkeypatch):
         def __exit__(self, *exc):
             return False
 
-        def starttls(self):
-            conversation.append(("starttls",))
+        def starttls(self, *, context=None):
+            conversation.append(("starttls", context))
 
         def login(self, user, password):
             conversation.append(("login", user, password))
@@ -365,9 +367,14 @@ def test_the_smtp_sender_upgrades_the_connection_logs_in_and_sends(monkeypatch):
 
     sender.send(MailMessage(to=("alex",), subject="Revenue fired", body="body", fire_key=FIRE_KEY))
 
-    assert conversation == [
-        ("connect", "mail.example.com", 2525),
-        ("starttls",),
+    assert conversation[:1] == [("connect", "mail.example.com", 2525)]
+    # starttls must be handed a context, and that context must verify: smtplib's
+    # default one leaves verify_mode=CERT_NONE, which trusts any server that answers.
+    assert conversation[1][0] == "starttls"
+    context = conversation[1][1]
+    assert context is not None and context.verify_mode == ssl.CERT_REQUIRED
+    assert context.check_hostname is True
+    assert conversation[2:] == [
         ("login", "day1", "secret"),
         ("send", "alex", "Revenue fired"),
     ]
@@ -386,7 +393,7 @@ def test_a_sender_without_starttls_or_a_user_sends_plainly(monkeypatch):
         def __exit__(self, *exc):
             return False
 
-        def starttls(self):  # pragma: no cover - must not be called
+        def starttls(self, *, context=None):  # pragma: no cover - must not be called
             conversation.append(("starttls",))
 
         def login(self, user, password):  # pragma: no cover - must not be called
@@ -468,3 +475,87 @@ def test_a_directory_email_that_is_not_an_address_is_refused(tmp_path):
 
     with pytest.raises(ConfigError):
         user_named("rita", users)
+
+
+# --- certificate verification is not optional -------------------------------
+
+
+def test_starttls_is_given_a_verifying_context(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class _Smtp:
+        def __init__(self, host, port, timeout=None):
+            captured["host"] = host
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def starttls(self, *, context=None):
+            captured["context"] = context
+
+        def login(self, user, password):
+            captured["login"] = user
+
+        def send_message(self, message):
+            captured["sent"] = message
+
+    monkeypatch.setattr(smtplib, "SMTP", _Smtp)
+    sender = SmtpSender(host="smtp.example.test", port=587, sender="a@b.test",
+                        user="u", password="p", starttls=True)
+    sender.send(MailMessage(to=("x@y.test",), subject="s", body="b", fire_key="k"))
+
+    context = captured["context"]
+    assert context is not None, "starttls must be handed a context, or the default one does not verify"
+    assert context.verify_mode == ssl.CERT_REQUIRED
+    assert context.check_hostname is True
+    assert captured["sent"] is not None
+
+
+def test_implicit_tls_is_given_a_verifying_context(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class _SmtpSSL:
+        def __init__(self, host, port, timeout=None, context=None):
+            captured["context"] = context
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def login(self, user, password):
+            captured["login"] = user
+
+        def send_message(self, message):
+            captured["sent"] = message
+
+    monkeypatch.setattr(smtplib, "SMTP_SSL", _SmtpSSL)
+    sender = SmtpSender(host="smtp.example.test", port=465, sender="a@b.test",
+                        user="u", password="p", starttls=False, ssl=True)
+    sender.send(MailMessage(to=("x@y.test",), subject="s", body="b", fire_key="k"))
+
+    context = captured["context"]
+    assert context is not None
+    assert context.verify_mode == ssl.CERT_REQUIRED
+    assert captured["sent"] is not None
+
+
+def test_an_internal_ca_is_used_instead_of_disabling_verification(monkeypatch, tmp_path):
+    ca = tmp_path / "internal-ca.pem"
+    ca.write_text("-----BEGIN CERTIFICATE-----\nnot a real cert\n-----END CERTIFICATE-----\n")
+    seen: dict[str, object] = {}
+    real = ssl.create_default_context
+
+    def spy(*, cafile=None):
+        seen["cafile"] = cafile
+        return real()
+
+    monkeypatch.setattr(ssl, "create_default_context", spy)
+    sender = SmtpSender(host="h", port=587, sender="a@b.test", starttls=True, ca_bundle=str(ca))
+    context = ssl.create_default_context(cafile=sender.ca_bundle)
+    assert seen["cafile"] == str(ca)
+    assert context.verify_mode == ssl.CERT_REQUIRED

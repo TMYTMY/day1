@@ -98,6 +98,9 @@ class Settings:
     settings_path: Path = field(default_factory=lambda: ROOT / "data" / "instance.db")
     # Fernet key for that store. Never copied into logs or into the database.
     secret_key: str | None = None
+    # A private relay gets a CA bundle; certificate verification itself is not
+    # optional, so there is no flag to turn it off.
+    smtp_ca_bundle: str | None = None
 
     @property
     def smtp_configured(self) -> bool:
@@ -227,4 +230,5 @@ def load_settings() -> Settings:
         smtp_from=smtp_from or DEFAULT_SMTP_FROM,
         smtp_starttls=smtp_starttls,
         smtp_ssl=smtp_ssl,
+        smtp_ca_bundle=_optional("SMTP_CA_BUNDLE"),
     )

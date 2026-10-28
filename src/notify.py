@@ -32,6 +32,7 @@ No model call and no network happen anywhere in this module except inside
 from __future__ import annotations
 
 import smtplib
+import ssl
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -160,6 +161,7 @@ class SmtpSender:
     password: str | None = None
     starttls: bool = True
     ssl: bool = False
+    ca_bundle: str | None = None
     timeout: float = 30.0
 
     @classmethod
@@ -178,6 +180,7 @@ class SmtpSender:
             password=settings.smtp_password,
             starttls=bool(settings.smtp_starttls),
             ssl=bool(settings.smtp_ssl),
+            ca_bundle=settings.smtp_ca_bundle,
         )
 
     def message_for(self, message: MailMessage) -> EmailMessage:
@@ -202,12 +205,23 @@ class SmtpSender:
         to do about it.
         """
         mail = self.message_for(message)
+        # Certificates are verified, and there is deliberately no way to turn that
+        # off. smtplib's default context does NOT verify (ssl._create_stdlib_context
+        # leaves verify_mode=CERT_NONE and check_hostname=False), so passing no
+        # context is the same as trusting any server that answers. A company with a
+        # private relay supplies SMTP_CA_BUNDLE rather than weakening the check.
+        context = ssl.create_default_context(cafile=self.ca_bundle)
         # 465 speaks TLS from the first byte; 587 starts plain and upgrades. The
         # settings layer guarantees the two flags are never both true.
-        factory = smtplib.SMTP_SSL if self.ssl else smtplib.SMTP
-        with factory(self.host, self.port, timeout=self.timeout) as smtp:
-            if self.starttls and not self.ssl:
-                smtp.starttls()
+        if self.ssl:
+            with smtplib.SMTP_SSL(self.host, self.port, timeout=self.timeout, context=context) as smtp:
+                if self.user:
+                    smtp.login(self.user, self.password or "")
+                smtp.send_message(mail)
+            return
+        with smtplib.SMTP(self.host, self.port, timeout=self.timeout) as smtp:
+            if self.starttls:
+                smtp.starttls(context=context)
             if self.user:
                 smtp.login(self.user, self.password or "")
             smtp.send_message(mail)

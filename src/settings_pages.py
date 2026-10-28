@@ -13,17 +13,29 @@ from dataclasses import replace
 
 import streamlit as st
 
+from src.alert_cli import condition, resolution, window
+from src.alerts import (
+    CONFIRMED,
+    PAUSED,
+    AlertDefinition,
+    AlertService,
+)
 from src.audit import AuditLog
-from src.capabilities import ADMIN, authorize
+from src.auth import user_named
+from src.capabilities import ADMIN, QUERY, authorize
 from src.config import Settings, redact
 from src.crypto import SecretKeyError
+from src.fires import FireStore
 from src.mail_settings import (
     SOURCE_UNCONFIGURED,
     MailSettingsStore,
     ResolvedMail,
 )
 from src.mail_setup import PRESETS, verify
+from src.metrics import Metric
 from src.models import User
+from src.routing import Catalog
+from src.worker import Worker
 
 # One sentence, also in the README. Demo sign-in is not authentication, and
 # these pages must not be treated as though it were.
@@ -421,3 +433,129 @@ def render_mail_page(user: User, settings: Settings, audit: AuditLog) -> None:
         )
     if st.button("Clear stored mail settings", key="mail_clear"):
         _clear_mail(user, settings, audit, store)
+
+
+def _topic_titles(service: AlertService) -> dict[str, str]:
+    """The same table-to-topic-title map a fire passes to authorize()."""
+    titles: dict[str, str] = {}
+    for topic in service.catalog.topics:
+        for table in topic.tables:
+            titles.setdefault(table, topic.title)
+    return titles
+
+
+def _metric(service: AlertService, metric_id: str) -> Metric | None:
+    for metric in service.metrics:
+        if metric.id == metric_id:
+            return metric
+    return None
+
+
+def _recipient_note(username: str, metric: Metric | None, service: AlertService) -> str:
+    """Whether this recipient can still read the metric, checked the way a fire checks it."""
+    person = user_named(username, service.users_path)
+    if person is None:
+        return f"{username} (not in the directory)"
+    if metric is None:
+        return f"{username} (metric is not in the catalogue)"
+    decision = authorize(person, QUERY, (metric.table,), display=_topic_titles(service))
+    if decision.allowed:
+        return f"{username} (can read {metric.title})"
+    return f"{username} ({decision.message})"
+
+
+def _last_fire(fires: FireStore, alert_id: int) -> str:
+    rows = fires.fires(alert_id)
+    if not rows:
+        return "none"
+    row = rows[-1]
+    verdict = row.get("verdict") or "unknown"
+    end = row.get("window_end") or ""
+    return f"{verdict} · window end {end}"
+
+
+def _remember_alert(message: str, *, ok: bool) -> None:
+    st.session_state["alert_notice"] = message
+    st.session_state["alert_notice_ok"] = ok
+    st.rerun()
+
+
+def _show_alert_notice() -> None:
+    notice = st.session_state.pop("alert_notice", None)
+    if notice is None:
+        return
+    if st.session_state.pop("alert_notice_ok", False):
+        st.success(notice)
+    else:
+        st.error(notice)
+
+
+def _run_definition(user: User, settings: Settings, audit: AuditLog, definition: AlertDefinition) -> None:
+    """The worker seam the command line uses. Ownership is checked first, the same way."""
+    if definition.owner != user.username:
+        _remember_alert(
+            "Only the owner of an alert definition can run it. "
+            f"The owner is {definition.owner}.",
+            ok=False,
+        )
+        return
+    outcomes = Worker.from_settings(settings, audit=audit).tick(only={definition.id})
+    if not outcomes:
+        _remember_alert(
+            f"Alert definition #{definition.id} is {definition.state}, so it is not scheduled.",
+            ok=False,
+        )
+        return
+    outcome = outcomes[0]
+    _remember_alert(f"Outcome: {outcome.outcome}. {outcome.message}", ok=True)
+
+
+def render_alerts_page(user: User, settings: Settings, audit: AuditLog, catalog: Catalog) -> None:
+    """Every definition, including paused and superseded, with the owner's actions."""
+    _sidebar(user, "sign_out_alerts")
+    st.markdown('<p class="d1-kicker">Settings</p>', unsafe_allow_html=True)
+    st.title("Alerts")
+    st.warning(DEMO_AUTH_WARNING)
+    if not _require_admin(user, audit):
+        return
+
+    service = AlertService.from_settings(settings, audit=audit, catalog=catalog)
+    fires = FireStore(settings.alerts_path)
+    _show_alert_notice()
+    definitions = service.definitions()
+    if not definitions:
+        st.info("No alert definitions on this instance.")
+        return
+
+    for definition in definitions:
+        metric = _metric(service, definition.metric_id)
+        title = metric.title if metric is not None else definition.metric_id
+        recipients = ", ".join(
+            _recipient_note(name, metric, service) for name in definition.recipients
+        ) or "none"
+        st.markdown(f"**#{definition.id} · {title}**")
+        st.caption(
+            f"State: {definition.state} · "
+            f"Metric: {definition.metric_id} · "
+            f"Condition: {condition(definition)} · "
+            f"Window: {window(definition)} · "
+            f"Confirmed: {resolution(definition)} · "
+            f"Owner: {definition.owner}"
+        )
+        st.markdown(f"Recipients: {recipients}")
+        st.caption(f"Last fire: {_last_fire(fires, definition.id)}")
+        if definition.state == CONFIRMED and st.button(
+            "Pause", key=f"alert_pause_{definition.id}"
+        ):
+            result = service.pause(definition.id, user)
+            _remember_alert(result.message, ok=result.ok)
+        if definition.state == PAUSED and st.button(
+            "Resume", key=f"alert_resume_{definition.id}"
+        ):
+            result = service.resume(definition.id, user)
+            _remember_alert(result.message, ok=result.ok)
+        if definition.state in (CONFIRMED, PAUSED) and st.button(
+            "Run now", key=f"alert_run_{definition.id}"
+        ):
+            _run_definition(user, settings, audit, definition)
+

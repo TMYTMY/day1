@@ -217,3 +217,136 @@ def test_a_test_send_to_a_local_relay_renders_the_success(monkeypatch, tmp_path)
         assert relay.messages
     sent = [row for row in _events(tmp_path / "audit.db") if row["event_type"] == "mail_test_sent"]
     assert sent[-1]["question"] == "to=someone@example.test outcome=ok"
+
+
+_DIRECTORY = """
+roles:
+  analyst:
+    tables: [revenue, dau]
+    capabilities: [query, alert]
+  finance:
+    tables: [revenue]
+    capabilities: [query]
+  growth:
+    tables: [dau]
+    capabilities: [query]
+  owner:
+    tables: []
+    capabilities: [admin]
+  lead:
+    tables: [revenue, dau]
+    capabilities: [query, alert, admin]
+users:
+  - username: analyst
+    password: analyst
+    role: analyst
+  - username: finance
+    password: finance
+    role: finance
+  - username: growth
+    password: growth
+    role: growth
+  - username: owner
+    password: owner
+    role: owner
+  - username: lead
+    password: lead
+    role: lead
+"""
+
+
+def _plant(path):
+    from datetime import date
+
+    from src.alerts import AlertDraft, AlertStore
+
+    store = AlertStore(path)
+    draft = dict(
+        metric_id="revenue_by_product",
+        comparison="above_absolute",
+        constant=1_000_000_000_000,
+        window_days=7,
+        cadence="daily",
+        local_time="09:00",
+        recipients=("finance", "growth"),
+        owner="lead",
+        owner_role="lead",
+    )
+    live = store.add(AlertDraft(**draft))
+    store.confirm(live, by="lead", at="2026-10-02T09:00:00Z", effective_from=date(2026, 10, 2))
+    paused = store.add(AlertDraft(**draft))
+    store.confirm(paused, by="lead", at="2026-10-03T09:00:00Z", effective_from=date(2026, 10, 3))
+    store.pause(paused)
+    retired = store.add(AlertDraft(**{**draft, "recipients": ("finance",)}))
+    store.confirm(retired, by="lead", at="2026-09-01T09:00:00Z", effective_from=date(2026, 9, 1))
+    store.supersede(retired, by_id=live)
+    return live, paused, retired
+
+
+def test_the_alert_list_shows_every_state_and_the_owner_can_act(monkeypatch, tmp_path):
+    users = tmp_path / "users.yaml"
+    users.write_text(_DIRECTORY, encoding="utf-8")
+    live, paused, retired = _plant(tmp_path / "alerts.db")
+    at = _open_mail(
+        monkeypatch,
+        tmp_path,
+        "lead",
+        USERS_PATH=str(users),
+        DAY1_SECRET_KEY=generate_key(),
+    )
+    at = at.sidebar.radio(key="nav_page").set_value("alerts").run(timeout=60)
+    page = _blob(at)
+    assert "demo password" in page
+    assert "State: confirmed" in page
+    assert "State: paused" in page
+    assert "State: superseded" in page
+    assert "Metric: revenue_by_product" in page
+    assert "Condition: above 1,000,000,000,000" in page
+    assert "Window: 7 days" in page
+    assert "Confirmed: 2026-10-02" in page
+    assert "finance (can read Revenue by product)" in page
+    assert "Revenue is outside the growth role." in page
+    assert "Last fire: none" in page
+    keys = [button.key for button in at.button]
+    assert f"alert_pause_{live}" in keys
+    assert f"alert_resume_{paused}" in keys
+    assert f"alert_run_{live}" in keys
+    assert f"alert_pause_{retired}" not in keys
+
+    at = at.button(key=f"alert_pause_{live}").click().run(timeout=60)
+    assert "is paused" in _blob(at)
+    assert any(row["event_type"] == "alert_paused" for row in _events(tmp_path / "audit.db"))
+
+    at = at.button(key=f"alert_resume_{live}").click().run(timeout=60)
+    assert "is live again" in _blob(at)
+    assert any(row["event_type"] == "alert_resumed" for row in _events(tmp_path / "audit.db"))
+
+    at = at.button(key=f"alert_run_{live}").click().run(timeout=90)
+    page = _blob(at)
+    assert "Outcome: not_fired" in page
+    assert "Last fire: no_fire" in page
+    assert any(row["event_type"] == "alert_not_fired" for row in _events(tmp_path / "audit.db"))
+
+    at = at.button(key="sign_out_alerts").click().run(timeout=60)
+    at = _sign_in(at, "owner", "owner")
+    at = at.sidebar.radio(key="nav_page").set_value("alerts").run(timeout=60)
+    at = at.button(key=f"alert_pause_{live}").click().run(timeout=60)
+    assert "Only the owner of an alert definition can pause it." in _blob(at)
+    assert "The owner is lead." in _blob(at)
+    refused = [row for row in _events(tmp_path / "audit.db") if row["event_type"] == "alert_refused"]
+    assert refused
+    at = at.button(key=f"alert_run_{live}").click().run(timeout=60)
+    assert "Only the owner of an alert definition can run it." in _blob(at)
+    assert "The owner is lead." in _blob(at)
+
+
+def test_the_alert_list_refuses_a_role_without_admin(monkeypatch, tmp_path):
+    """Mutation: deleting the authorize() gate on this page turns this test red."""
+    at = _open_mail(monkeypatch, tmp_path, "analyst")
+    at = at.sidebar.radio(key="nav_page").set_value("alerts").run(timeout=60)
+    page = _blob(at)
+    assert "The admin capability is not granted to the analyst role." in page
+    assert "not a substitute for authentication" in page
+    assert "alert_pause_" not in " ".join(button.key or "" for button in at.button)
+    assert any(row["event_type"] == "settings_refused" for row in _events(tmp_path / "audit.db"))
+

@@ -30,7 +30,7 @@ from src.models import Answer, User
 from src.pipeline import answer_question
 from src.present import column_label, format_value, is_money, looks_like_time
 from src.routing import Catalog, load_catalog
-from src.settings_pages import render_mail_page
+from src.settings_pages import render_alerts_page, render_mail_page
 from src.sources import (
     SourceSpec,
     load_sources,
@@ -434,11 +434,12 @@ def _page_choice() -> str:
         "knowledge": "知識庫",
         "sources": "Data sources",
         "mail": "Mail settings",
+        "alerts": "Alerts",
     }
     with st.sidebar:
         return st.radio(
             "Navigate",
-            options=["ask", "knowledge", "sources", "mail"],
+            options=["ask", "knowledge", "sources", "mail", "alerts"],
             format_func=lambda value: labels[value],
             key="nav_page",
         )
@@ -684,6 +685,9 @@ def main() -> None:
         return
     if page == "mail":
         render_mail_page(user, settings, audit)
+        return
+    if page == "alerts":
+        render_alerts_page(user, settings, audit, catalog)
         return
 
     st.markdown('<p class="d1-kicker">Warehouse Q&A</p>', unsafe_allow_html=True)

@@ -9,6 +9,7 @@ resume and run-now go through :class:`src.alerts.AlertService` and the worker.
 
 from __future__ import annotations
 
+import html
 from dataclasses import replace
 
 import streamlit as st
@@ -400,8 +401,12 @@ def render_mail_page(user: User, settings: Settings, audit: AuditLog) -> None:
         )
         sender = st.text_input("From", key="mail_from")
         destination = st.text_input("Send the test message to", key="mail_test_to")
-        save_clicked = st.form_submit_button("Save mail settings", key="mail_save")
-        test_clicked = st.form_submit_button("Send test message", key="mail_test")
+        save_clicked = st.form_submit_button(
+            "Save mail settings", key="mail_save", type="primary"
+        )
+        test_clicked = st.form_submit_button(
+            "Send test message", key="mail_test", type="secondary"
+        )
 
     if save_clicked:
         _save_mail(
@@ -431,8 +436,40 @@ def render_mail_page(user: User, settings: Settings, audit: AuditLog) -> None:
             sender=sender,
             destination=destination,
         )
-    if st.button("Clear stored mail settings", key="mail_clear"):
-        _clear_mail(user, settings, audit, store)
+    _render_clear_mail(user, settings, audit, store)
+
+
+def _render_clear_mail(user: User, settings: Settings, audit: AuditLog, store: MailSettingsStore) -> None:
+    """Destructive clear, last on the page, and only after a named confirmation.
+
+    The first button arms the question. ``store.clear`` runs only when the
+    person answers "Clear stored mail settings for this instance?".
+    """
+    st.markdown('<div class="d1-sep"></div>', unsafe_allow_html=True)
+    st.markdown(
+        '<p class="d1-danger">This removes the mail settings stored for this instance, '
+        "including the password. It does not change .env.</p>",
+        unsafe_allow_html=True,
+    )
+    if st.session_state.get("mail_clear_armed"):
+        st.markdown(
+            '<p class="d1-danger"><strong>Clear stored mail settings for this instance?</strong></p>',
+            unsafe_allow_html=True,
+        )
+        if st.button(
+            "Clear stored mail settings for this instance",
+            key="mail_clear_confirm",
+            type="secondary",
+        ):
+            st.session_state["mail_clear_armed"] = False
+            _clear_mail(user, settings, audit, store)
+        if st.button("Keep stored mail settings", key="mail_clear_keep", type="tertiary"):
+            st.session_state["mail_clear_armed"] = False
+            st.rerun()
+        return
+    if st.button("Clear stored mail settings", key="mail_clear", type="secondary"):
+        st.session_state["mail_clear_armed"] = True
+        st.rerun()
 
 
 def _topic_titles(service: AlertService) -> dict[str, str]:
@@ -467,11 +504,9 @@ def _recipient_note(username: str, metric: Metric | None, service: AlertService)
 def _last_fire(fires: FireStore, alert_id: int) -> str:
     rows = fires.fires(alert_id)
     if not rows:
-        return "none"
-    row = rows[-1]
-    verdict = row.get("verdict") or "unknown"
-    end = row.get("window_end") or ""
-    return f"{verdict} · window end {end}"
+        return "Last fire: none"
+    verdict = rows[-1].get("verdict") or "unknown"
+    return f"Last fire: {verdict}"
 
 
 def _remember_alert(message: str, *, ok: bool) -> None:
@@ -528,34 +563,60 @@ def render_alerts_page(user: User, settings: Settings, audit: AuditLog, catalog:
         return
 
     for definition in definitions:
-        metric = _metric(service, definition.metric_id)
-        title = metric.title if metric is not None else definition.metric_id
-        recipients = ", ".join(
-            _recipient_note(name, metric, service) for name in definition.recipients
-        ) or "none"
-        st.markdown(f"**#{definition.id} · {title}**")
-        st.caption(
-            f"State: {definition.state} · "
-            f"Metric: {definition.metric_id} · "
-            f"Condition: {condition(definition)} · "
-            f"Window: {window(definition)} · "
-            f"Confirmed: {resolution(definition)} · "
-            f"Owner: {definition.owner}"
+        _render_alert_row(definition, user, service, fires, settings, audit)
+
+
+def _render_alert_row(
+    definition: AlertDefinition,
+    user: User,
+    service: AlertService,
+    fires: FireStore,
+    settings: Settings,
+    audit: AuditLog,
+) -> None:
+    """One quiet row: state pill, metric, condition, last fire, then the actions."""
+    metric = _metric(service, definition.metric_id)
+    title = metric.title if metric is not None else definition.metric_id
+    recipients = ", ".join(
+        _recipient_note(name, metric, service) for name in definition.recipients
+    ) or "none"
+    state = definition.state if definition.state in {"confirmed", "paused", "superseded", "draft"} else "draft"
+    with st.container(key=f"alert_row_{definition.id}"):
+        identity, rule, fired, actions = st.columns([2.5, 1.8, 1.5, 1.7], gap="small")
+        with identity:
+            st.markdown(
+                '<div class="d1-identity">'
+                f'<div><span class="d1-state d1-state-{state}">{html.escape(definition.state)}</span></div>'
+                f'<div class="d1-identity-title">{html.escape(title)}</div>'
+                f'<div class="d1-identity-id">{html.escape(definition.metric_id)}</div>'
+                "</div>",
+                unsafe_allow_html=True,
+            )
+        with rule:
+            st.markdown(condition(definition))
+        with fired:
+            st.markdown(_last_fire(fires, definition.id))
+        with actions:
+            if definition.state == CONFIRMED and st.button(
+                "Pause", key=f"alert_pause_{definition.id}"
+            ):
+                result = service.pause(definition.id, user)
+                _remember_alert(result.message, ok=result.ok)
+            if definition.state == PAUSED and st.button(
+                "Resume", key=f"alert_resume_{definition.id}"
+            ):
+                result = service.resume(definition.id, user)
+                _remember_alert(result.message, ok=result.ok)
+            if definition.state in (CONFIRMED, PAUSED) and st.button(
+                "Run now", key=f"alert_run_{definition.id}"
+            ):
+                _run_definition(user, settings, audit, definition)
+        st.markdown(
+            '<div class="d1-alert-well">'
+            f"<span>Window</span><span>{html.escape(window(definition))}</span>"
+            f"<span>Confirmed</span><span>{html.escape(resolution(definition))}</span>"
+            f"<span>Recipients</span><span>{html.escape(recipients)}</span>"
+            "</div>",
+            unsafe_allow_html=True,
         )
-        st.markdown(f"Recipients: {recipients}")
-        st.caption(f"Last fire: {_last_fire(fires, definition.id)}")
-        if definition.state == CONFIRMED and st.button(
-            "Pause", key=f"alert_pause_{definition.id}"
-        ):
-            result = service.pause(definition.id, user)
-            _remember_alert(result.message, ok=result.ok)
-        if definition.state == PAUSED and st.button(
-            "Resume", key=f"alert_resume_{definition.id}"
-        ):
-            result = service.resume(definition.id, user)
-            _remember_alert(result.message, ok=result.ok)
-        if definition.state in (CONFIRMED, PAUSED) and st.button(
-            "Run now", key=f"alert_run_{definition.id}"
-        ):
-            _run_definition(user, settings, audit, definition)
 

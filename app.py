@@ -57,10 +57,22 @@ SUGGESTIONS = (
 )
 
 
+def _page_mark():
+    """A teal mark for the browser tab. Not an emoji."""
+    from PIL import Image, ImageDraw
+
+    image = Image.new("RGBA", (32, 32), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    draw.rounded_rectangle((1, 1, 30, 30), radius=6, fill=(14, 107, 86, 255))
+    draw.rectangle((8, 15, 24, 18), fill=(246, 244, 239, 255))
+    return image
+
+
 def _css() -> None:
     st.markdown(
         """
         <style>
+          .stApp { --d1-danger: #9B2C2C; }
           .block-container { max-width: 1080px; padding-top: 1.4rem; }
           .d1-kicker {
             letter-spacing: 0.14em;
@@ -69,6 +81,56 @@ def _css() -> None:
             color: #0E6B56;
             font-weight: 650;
             margin-bottom: 0;
+          }
+          .d1-danger { color: var(--d1-danger); }
+          .d1-sep {
+            height: 0;
+            border: 0;
+            border-top: 1px solid rgba(28, 36, 33, 0.18);
+            margin: 32px 0 20px;
+          }
+          .st-key-mail_clear button,
+          .st-key-mail_clear_confirm button {
+            background: transparent !important;
+            color: var(--d1-danger) !important;
+            border: 1px solid var(--d1-danger) !important;
+          }
+          .d1-state {
+            display: inline-block;
+            font-size: 0.75rem;
+            line-height: 1.2;
+            font-weight: 650;
+            padding: 0.12rem 0.5rem;
+            border-radius: 999px;
+            border: 1px solid currentColor;
+            background: transparent;
+            white-space: nowrap;
+          }
+          .d1-identity-title { font-weight: 650; margin-top: 0.28rem; }
+          .d1-identity-id { color: rgba(28, 36, 33, 0.62); font-size: 0.85rem; }
+          [class*="st-key-alert_row_"] [data-testid="stVerticalBlock"] {
+            align-items: flex-start;
+          }
+          .d1-state-confirmed { color: #0E6B56; }
+          .d1-state-paused { color: #8A5A12; }
+          .d1-state-superseded, .d1-state-draft { color: #5C6562; }
+          .d1-alert-well {
+            display: grid;
+            grid-template-columns: 6.5rem minmax(0, 1fr);
+            gap: 0.15rem 0.75rem;
+            margin: 0.2rem 0 0.35rem;
+            font-size: 0.92rem;
+            color: #1C2421;
+          }
+          .d1-alert-well span:nth-child(odd) { color: rgba(28, 36, 33, 0.62); }
+          [class*="st-key-alert_row_"] {
+            border-bottom: 1px solid rgba(28, 36, 33, 0.12);
+            padding-bottom: 0.45rem;
+            margin-bottom: 0.35rem;
+          }
+          [class*="st-key-alert_row_"] [data-testid="stHorizontalBlock"] {
+            flex-wrap: wrap;
+            row-gap: 0.45rem;
           }
           div[data-testid="stMetric"] {
             background: #ffffff;
@@ -630,7 +692,7 @@ def _consume_pending(
 
 
 def main() -> None:
-    st.set_page_config(page_title="Day 1", page_icon="📗", layout="wide")
+    st.set_page_config(page_title="Day 1", page_icon=_page_mark(), layout="wide")
     _css()
     _init_state()
     try:

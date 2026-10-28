@@ -159,6 +159,11 @@ def test_an_empty_password_keeps_the_stored_one_and_clear_removes_it(monkeypatch
     assert "smtp_password" not in _events(tmp_path / "audit.db")[-1]["question"]
 
     at = at.button(key="mail_clear").click().run(timeout=60)
+    armed = _blob(at)
+    assert "Clear stored mail settings for this instance?" in armed
+    assert "Cleared stored mail settings." not in armed
+    assert store.resolve(load_settings())["smtp_password"].value == SECRET
+    at = at.button(key="mail_clear_confirm").click().run(timeout=60)
     assert "Cleared stored mail settings." in _blob(at)
     cleared = store.resolve(load_settings())
     assert cleared["smtp_password"].value is None
@@ -342,13 +347,14 @@ def test_the_alert_list_shows_every_state_and_the_owner_can_act(monkeypatch, tmp
     at = at.sidebar.radio(key="nav_page").set_value("alerts").run(timeout=60)
     page = _blob(at)
     assert "demo password" in page
-    assert "State: confirmed" in page
-    assert "State: paused" in page
-    assert "State: superseded" in page
-    assert "Metric: revenue_by_product" in page
-    assert "Condition: above 1,000,000,000,000" in page
-    assert "Window: 7 days" in page
-    assert "Confirmed: 2026-10-02" in page
+    assert "d1-state-confirmed" in page
+    assert "d1-state-paused" in page
+    assert "d1-state-superseded" in page
+    assert "Revenue by product" in page
+    assert "revenue_by_product" in page
+    assert "above 1,000,000,000,000" in page
+    assert "7 days" in page
+    assert "2026-10-02" in page
     assert "finance (can read Revenue by product)" in page
     assert "Revenue is outside the growth role." in page
     assert "Last fire: none" in page

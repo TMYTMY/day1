@@ -30,6 +30,7 @@ from src.models import Answer, User
 from src.pipeline import answer_question
 from src.present import column_label, format_value, is_money, looks_like_time
 from src.routing import Catalog, load_catalog
+from src.settings_pages import render_mail_page
 from src.sources import (
     SourceSpec,
     load_sources,
@@ -115,6 +116,8 @@ def _session_user() -> User | None:
         username=raw["username"],
         role=raw["role"],
         allowed_tables=tuple(raw["allowed_tables"]),
+        capabilities=tuple(raw.get("capabilities") or ("query",)),
+        email=raw.get("email") if isinstance(raw.get("email"), str) else None,
     )
 
 
@@ -161,6 +164,8 @@ def _render_login(settings: Settings, audit: AuditLog) -> None:
                 "username": user.username,
                 "role": user.role,
                 "allowed_tables": list(user.allowed_tables),
+                "capabilities": list(user.capabilities),
+                "email": user.email,
             }
             st.session_state.messages = []
             st.session_state.last_result = None
@@ -424,11 +429,16 @@ def _sign_out() -> None:
 
 
 def _page_choice() -> str:
-    labels = {"ask": "Ask", "knowledge": "知識庫", "sources": "Data sources"}
+    labels = {
+        "ask": "Ask",
+        "knowledge": "知識庫",
+        "sources": "Data sources",
+        "mail": "Mail settings",
+    }
     with st.sidebar:
         return st.radio(
             "Navigate",
-            options=["ask", "knowledge", "sources"],
+            options=["ask", "knowledge", "sources", "mail"],
             format_func=lambda value: labels[value],
             key="nav_page",
         )
@@ -671,6 +681,9 @@ def main() -> None:
         return
     if page == "sources":
         _render_sources_page(user, settings, sources)
+        return
+    if page == "mail":
+        render_mail_page(user, settings, audit)
         return
 
     st.markdown('<p class="d1-kicker">Warehouse Q&A</p>', unsafe_allow_html=True)

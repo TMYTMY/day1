@@ -214,7 +214,12 @@ def _render_login(settings: Settings, audit: AuditLog) -> None:
                 st.error("Too many failed attempts. Try again in a few minutes.")
                 return
             try:
-                user = authenticate(candidate, password, settings.users_path)
+                user = authenticate(
+                    candidate,
+                    password,
+                    settings.users_path,
+                    settings_path=settings.settings_path,
+                )
             except ConfigError as exc:
                 st.error(str(exc))
                 return
@@ -236,9 +241,11 @@ def _render_login(settings: Settings, audit: AuditLog) -> None:
     with right:
         st.markdown("**Demo accounts**")
         st.caption(
-            "Demo accounts are listed in README.md. This screen is a local stand-in "
-            "for SSO — replace authenticate() in src/auth.py before pointing the app "
-            "at real data."
+            "Demo accounts sign in with the demo password of the same name and are "
+            "listed in README.md. The operator account has no password: it signs in with "
+            "the secret `python -m src.operator_secret --init` prints on the host. This "
+            "screen is a local stand-in for SSO — replace authenticate() in src/auth.py "
+            "before pointing the app at real data."
         )
 
 

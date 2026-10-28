@@ -11,6 +11,14 @@
 # may draft and confirm an alert definition, so the refusal a role without it
 # receives stays testable. The admin grant is a separate decision: the owner
 # role holds it and reads no tables.
+#
+# The owner account has no password here, and no password is documented
+# anywhere. It signs in with the instance operator secret, which
+# `python -m src.operator_secret --init` generates on this machine, prints
+# once, and keeps only as a salted hash in the instance settings database
+# (SETTINGS_PATH). A credential that grants admin and ships in the repository
+# is a decorative gate: anyone who can read this file could repoint the SMTP
+# host and have the stored mailbox password sent to a server of their choice.
 
 roles:
   analyst:
@@ -37,5 +45,5 @@ users:
     password: growth
     role: growth
   - username: owner
-    password: owner
     role: owner
+    credential: operator_secret

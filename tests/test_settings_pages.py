@@ -10,6 +10,18 @@ from streamlit.testing.v1 import AppTest
 
 SECRET = "day1-mail-secret-9912"
 
+# The secret the host generates with `python -m src.operator_secret --init`.
+# Tests plant it the way that command does, then keep the plaintext, which is
+# the only copy that exists: only a salted hash is stored.
+OPERATOR = "day1-operator-secret-4711"
+
+
+def _plant_operator(tmp_path) -> str:
+    from src.operator_secret import store_secret
+
+    store_secret(tmp_path / "instance.db", OPERATOR)
+    return OPERATOR
+
 
 def _blob(at: AppTest) -> str:
     parts: list[str] = []
@@ -35,6 +47,9 @@ def _isolate(monkeypatch, tmp_path, **extra: str) -> None:
     monkeypatch.setenv("SETTINGS_PATH", str(tmp_path / "instance.db"))
     monkeypatch.setenv("KNOWLEDGE_PATH", str(tmp_path / "knowledge"))
     monkeypatch.setenv("EMBEDDING_PROVIDER", "local")
+    # The write surface is off by default; a test that wants the form says so,
+    # and the test that wants it off passes "0" in ``extra``.
+    monkeypatch.setenv("DAY1_ALLOW_BROWSER_SETTINGS", "1")
     for name, value in extra.items():
         monkeypatch.setenv(name, value)
 
@@ -50,17 +65,24 @@ def _sign_in(at: AppTest, username: str, password: str) -> AppTest:
 
 def _open_mail(monkeypatch, tmp_path, username: str, **extra: str) -> AppTest:
     _isolate(monkeypatch, tmp_path, **extra)
+    _plant_operator(tmp_path)
     at = AppTest.from_file(str(ROOT / "app.py"), default_timeout=60).run(timeout=60)
-    at = _sign_in(at, username, username)
+    # The operator account has no password: it signs in with the host secret.
+    password = OPERATOR if username == "owner" else username
+    at = _sign_in(at, username, password)
     return at.sidebar.radio(key="nav_page").set_value("mail").run(timeout=60)
+
+
+def _operator(at: AppTest, secret: str = OPERATOR) -> AppTest:
+    """Type the operator secret into the mail form, as a person must."""
+    at.text_input(key="operator_secret").set_value(secret)
+    return at
 
 
 def _events(path) -> list[sqlite3.Row]:
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
-    rows = conn.execute(
-        "SELECT event_type, question, error, status FROM audit_events ORDER BY id"
-    ).fetchall()
+    rows = conn.execute("SELECT * FROM audit_events ORDER BY id").fetchall()
     conn.close()
     return list(rows)
 
@@ -81,6 +103,25 @@ def test_a_role_without_admin_is_refused_and_the_owner_can_enter(monkeypatch, tm
     assert owner.text_input(key="mail_host") is not None
     assert "demo password" in _blob(owner)
     assert owner.session_state["user"]["capabilities"] == ["admin"]
+
+    # Direction change: this test used to assert that the documented
+    # `owner / owner` login worked. That credential is removed, because a
+    # password that grants admin and ships in the repository is a decorative
+    # gate. What replaces it is the host-generated operator secret, asserted
+    # here as "the old password opens nothing, the secret opens the account".
+    _isolate(monkeypatch, tmp_path)
+    _plant_operator(tmp_path)
+    at = AppTest.from_file(str(ROOT / "app.py"), default_timeout=60).run(timeout=60)
+    stale = _sign_in(at, "owner", "owner")
+    assert stale.session_state.get("user") is None
+    assert "did not match" in _blob(stale)
+
+    _isolate(monkeypatch, tmp_path)
+    _plant_operator(tmp_path)
+    at = AppTest.from_file(str(ROOT / "app.py"), default_timeout=60).run(timeout=60)
+    current = _sign_in(at, "owner", OPERATOR)
+    assert current.session_state["user"]["username"] == "owner"
+    assert current.session_state["user"]["capabilities"] == ["admin"]
 
 
 def test_provider_presets_fill_host_port_and_tls(monkeypatch, tmp_path):
@@ -117,6 +158,7 @@ def test_env_values_are_labelled_until_a_save_stores_them(monkeypatch, tmp_path)
     assert "source: database" not in page
 
     at.text_input(key="mail_password").set_value(SECRET)
+    at = _operator(at)
     at = at.button(key="mail_save").click().run(timeout=60)
     page = _blob(at)
     assert "source: database" in page
@@ -143,6 +185,7 @@ def test_an_empty_password_keeps_the_stored_one_and_clear_removes_it(monkeypatch
     at.text_input(key="mail_user").set_value("owner@example.com")
     at.text_input(key="mail_from").set_value("owner@example.com")
     at.text_input(key="mail_password").set_value(SECRET)
+    at = _operator(at)
     at = at.button(key="mail_save").click().run(timeout=60)
 
     # The from-address is not part of the transport the password was entered
@@ -150,6 +193,8 @@ def test_an_empty_password_keeps_the_stored_one_and_clear_removes_it(monkeypatch
     # refused: that is the binding, and it has its own test.
     at.text_input(key="mail_from").set_value("alerts@example.com")
     assert at.text_input(key="mail_password").value in ("", None)
+    # The secret is not kept either: changing the port needs it typed again.
+    at = _operator(at)
     at = at.button(key="mail_save").click().run(timeout=60)
 
     from src.mail_settings import MailSettingsStore
@@ -167,6 +212,8 @@ def test_an_empty_password_keeps_the_stored_one_and_clear_removes_it(monkeypatch
     assert "Clear stored mail settings for this instance?" in armed
     assert "Cleared stored mail settings." not in armed
     assert store.resolve(load_settings())["smtp_password"].value == SECRET
+    # Clearing re-authenticates as well: it removes the stored password.
+    at.text_input(key="mail_clear_secret").set_value(OPERATOR)
     at = at.button(key="mail_clear_confirm").click().run(timeout=60)
     assert "Cleared stored mail settings." in _blob(at)
     cleared = store.resolve(load_settings())
@@ -181,6 +228,7 @@ def test_save_without_a_key_is_refused_on_the_page(monkeypatch, tmp_path):
     at.text_input(key="mail_host").set_value("smtp.example.com")
     at.text_input(key="mail_port").set_value("587")
     at.text_input(key="mail_password").set_value(SECRET)
+    at = _operator(at)
     at = at.button(key="mail_save").click().run(timeout=60)
     page = _blob(at)
     assert "DAY1_SECRET_KEY" in page
@@ -200,6 +248,7 @@ def test_a_refused_test_send_renders_the_hint(monkeypatch, tmp_path):
     at.selectbox(key="mail_tls").set_value("none")
     at.text_input(key="mail_from").set_value("day1@example.test")
     at.text_input(key="mail_test_to").set_value("someone@example.test")
+    at = _operator(at)
     at = at.button(key="mail_test").click().run(timeout=60)
     page = _blob(at)
     assert "Nothing is listening" in page
@@ -221,6 +270,7 @@ def test_a_test_send_to_a_local_relay_renders_the_success(monkeypatch, tmp_path)
         at.selectbox(key="mail_tls").set_value("none")
         at.text_input(key="mail_from").set_value("day1@example.test")
         at.text_input(key="mail_test_to").set_value("someone@example.test")
+        at = _operator(at)
         at = at.button(key="mail_test").click().run(timeout=60)
         assert "Delivered to someone@example.test" in _blob(at)
         assert relay.messages
@@ -253,6 +303,7 @@ def test_a_known_password_never_appears_in_the_store_the_audit_log_or_the_page(m
     at.text_input(key="mail_user").set_value("owner@example.com")
     at.text_input(key="mail_from").set_value("owner@example.com")
     at.text_input(key="mail_password").set_value(SECRET)
+    at = _operator(at)
     at = at.button(key="mail_save").click().run(timeout=60)
 
     assert SECRET not in _blob(at)
@@ -386,17 +437,52 @@ def test_the_alert_list_shows_every_state_and_the_owner_can_act(monkeypatch, tmp
     assert "Last fire: no_fire" in page
     assert any(row["event_type"] == "alert_not_fired" for row in _events(tmp_path / "audit.db"))
 
+    # Direction change: this test used to assert that the owner role was
+    # refused here ("Only the owner of an alert definition can pause it"),
+    # because pause, resume and run were owner-only while only the `alert`
+    # role could own a definition. The person who could open the page could
+    # therefore never operate anything on it. An `admin` now acts as the
+    # instance operator on any definition, and the audit row says so and
+    # names the owner. The owner role reads no tables, so the row's title,
+    # condition and last fire are not rendered for them.
     at = at.button(key="sign_out_alerts").click().run(timeout=60)
     at = _sign_in(at, "owner", "owner")
     at = at.sidebar.radio(key="nav_page").set_value("alerts").run(timeout=60)
+    page = _blob(at)
+    assert "Restricted metric" in page
+    assert "Condition hidden" in page
+    assert "Last fire hidden" in page
+    assert "Revenue by product" not in page
+    assert "above 1,000,000,000,000" not in page
+    assert "This metric is outside the owner role" in page
+
     at = at.button(key=f"alert_pause_{live}").click().run(timeout=60)
-    assert "Only the owner of an alert definition can pause it." in _blob(at)
-    assert "The owner is lead." in _blob(at)
-    refused = [row for row in _events(tmp_path / "audit.db") if row["event_type"] == "alert_refused"]
-    assert refused
-    at = at.button(key=f"alert_run_{live}").click().run(timeout=60)
-    assert "Only the owner of an alert definition can run it." in _blob(at)
-    assert "The owner is lead." in _blob(at)
+    page = _blob(at)
+    assert "is paused" in page
+    assert "You acted as the instance operator on lead's definition." in page
+    row = _events(tmp_path / "audit.db")[-1]
+    assert row["event_type"] == "alert_paused"
+    assert row["username"] == "owner"
+    assert row["capability"] == "admin"
+    assert "operator=true" in row["question"]
+    assert "owner=lead" in row["question"]
+
+    at = at.button(key=f"alert_resume_{live}").click().run(timeout=60)
+    assert "is live again" in _blob(at)
+    row = _events(tmp_path / "audit.db")[-1]
+    assert row["event_type"] == "alert_resumed"
+    assert row["capability"] == "admin"
+
+    at = at.button(key=f"alert_run_{live}").click().run(timeout=90)
+    assert "Outcome:" in _blob(at)
+    run_now = [
+        item for item in _events(tmp_path / "audit.db") if item["event_type"] == "alert_run_now"
+    ]
+    assert run_now
+    assert run_now[-1]["username"] == "owner"
+    assert run_now[-1]["capability"] == "admin"
+    assert "run alert definition" in run_now[-1]["question"]
+    assert "owner lead" in run_now[-1]["question"]
 
 
 def test_the_alert_list_refuses_a_role_without_admin(monkeypatch, tmp_path):

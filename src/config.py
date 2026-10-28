@@ -98,6 +98,11 @@ class Settings:
     settings_path: Path = field(default_factory=lambda: ROOT / "data" / "instance.db")
     # Fernet key for that store. Never copied into logs or into the database.
     secret_key: str | None = None
+    # Browser settings are off unless an operator turns them on with
+    # DAY1_ALLOW_BROWSER_SETTINGS=1. Repointing the mail sender from a web
+    # session is the one settings change that can hand a stored credential to
+    # somebody else, so it is a decision, not a default.
+    allow_browser_settings: bool = False
     # A private relay gets a CA bundle; certificate verification itself is not
     # optional, so there is no flag to turn it off.
     smtp_ca_bundle: str | None = None
@@ -187,6 +192,12 @@ def load_settings() -> Settings:
     if smtp_ssl:
         # implicit TLS on 465 and STARTTLS on 587 are alternatives, never both
         smtp_starttls = False
+    # One flag, read once. Only an explicit yes opens the browser write
+    # surface; "0", an empty value and a typo all leave it closed.
+    browser_settings_allowed = (
+        os.environ.get("DAY1_ALLOW_BROWSER_SETTINGS", "").strip().lower()
+        in {"1", "true", "yes", "on"}
+    )
     return Settings(
         db_backend=backend,
         db_path=_resolve(os.environ.get("DB_PATH", ""), "data/demo.db"),
@@ -223,6 +234,9 @@ def load_settings() -> Settings:
         max_alert_window_days=max_alert_window_days,
         settings_path=_resolve(os.environ.get("SETTINGS_PATH", ""), "data/instance.db"),
         secret_key=_optional("DAY1_SECRET_KEY"),
+        # Off unless it says so: an unset variable, an empty value or a typo
+        # leaves the write surface closed, which is the safe direction.
+        allow_browser_settings=browser_settings_allowed,
         smtp_host=_optional("SMTP_HOST"),
         smtp_port=smtp_port,
         smtp_user=smtp_user,

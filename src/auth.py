@@ -8,6 +8,12 @@ A role holds two grants: the tables it may read and the capabilities it may
 run. A role with no `capabilities` key implies the query capability, which is
 how every role behaved before capabilities existed (see
 docs/migration/0001-capability-grants.md).
+
+One account has no password in this file: the operator account, which holds
+``admin``. It proves itself with the secret ``python -m src.operator_secret
+--init`` generates on the host and keeps only as a salted hash in the instance
+settings database. A credential that grants ``admin`` and ships in the
+repository is a decorative gate; one that exists only on the box is not.
 """
 
 from __future__ import annotations
@@ -25,6 +31,13 @@ from src.models import User
 # What a role could do before capabilities existed: ask a question.
 IMPLIED_CAPABILITIES: tuple[str, ...] = (QUERY,)
 
+# How an account proves who it is. ``password`` is the demo stand-in that
+# ships in this file; ``operator_secret`` is the host-generated secret whose
+# hash lives in the instance settings database, and it never ships at all.
+PASSWORD_CREDENTIAL = "password"
+OPERATOR_CREDENTIAL = "operator_secret"
+CREDENTIALS = (PASSWORD_CREDENTIAL, OPERATOR_CREDENTIAL)
+
 
 @dataclass(frozen=True)
 class _Account:
@@ -32,6 +45,7 @@ class _Account:
     password: str
     role: str
     email: str | None = None
+    credential: str = PASSWORD_CREDENTIAL
 
 
 @dataclass(frozen=True)
@@ -92,8 +106,27 @@ def load_directory(path: Path) -> Directory:
         username = entry.get("username")
         password = entry.get("password")
         role = entry.get("role")
-        if not all(isinstance(value, str) and value for value in (username, password, role)):
-            raise ConfigError("Each user needs a username, password, and role.")
+        credential = entry.get("credential", PASSWORD_CREDENTIAL)
+        if not isinstance(credential, str) or credential not in CREDENTIALS:
+            raise ConfigError(
+                f"User {username} has an unknown credential {credential!r}. "
+                f"Use one of {', '.join(CREDENTIALS)}."
+            )
+        if credential == OPERATOR_CREDENTIAL:
+            # No password in the file: the secret is generated on the host and
+            # only its hash is stored. A password beside it would be a second
+            # way in, which is the thing this account exists to remove.
+            if password:
+                raise ConfigError(
+                    f"User {username} has both a password and the operator secret, "
+                    "which would be two ways in. Remove the password."
+                )
+            password = ""
+            required = (username, role)
+        else:
+            required = (username, password, role)
+        if not all(isinstance(value, str) and value for value in required):
+            raise ConfigError("Each user needs a username, a password, and a role.")
         if role not in roles:
             raise ConfigError(f"User {username} references unknown role {role}.")
         email = entry.get("email")
@@ -105,19 +138,41 @@ def load_directory(path: Path) -> Directory:
             password=password,
             role=role,
             email=email.strip() if isinstance(email, str) else None,
+            credential=credential,
         )
     return Directory(roles=roles, capabilities=capabilities, accounts=accounts)
 
 
-def authenticate(username: str, password: str, path: Path) -> User | None:
-    """Return the user when the demo password matches, otherwise None."""
+def authenticate(
+    username: str,
+    password: str,
+    path: Path,
+    *,
+    settings_path: Path | None = None,
+) -> User | None:
+    """Return the user when the credential matches, otherwise None.
+
+    A demo account compares its password here. The operator account has no
+    password: it proves itself with the instance's operator secret, checked
+    against the salted hash in the settings database, so ``settings_path`` is
+    required for it. Without one that account is refused rather than guessed
+    at — an unverifiable credential is not a credential.
+    """
     directory = load_directory(path)
-    account = directory.accounts.get(username.strip())
-    # Compare even when the account is missing so the branch is less obvious.
-    candidate = account.password if account else "invalid-password"
-    if not hmac.compare_digest(candidate, password):
-        return None
+    account = directory.accounts.get((username or "").strip())
     if account is None:
+        # Compare even when the account is missing so the branch is less obvious.
+        hmac.compare_digest("invalid-password", password or "")
+        return None
+    if account.credential == OPERATOR_CREDENTIAL:
+        if settings_path is None:
+            return None
+        from src.operator_secret import verify_secret
+
+        matched = verify_secret(settings_path, password or "")
+    else:
+        matched = hmac.compare_digest(account.password, password or "")
+    if not matched:
         return None
     return User(
         username=account.username,

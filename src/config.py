@@ -1,4 +1,10 @@
-"""Environment-backed settings. Credentials stay in the process environment."""
+"""Environment-backed settings.
+
+Mail credentials may also live, encrypted, in the instance settings database.
+``load_settings`` reads ``.env`` only. :func:`src.mail_settings.resolve_mail_settings`
+is what the page, the worker and the notifier use, so a database value wins
+over the environment and a missing value stays unconfigured.
+"""
 
 from __future__ import annotations
 
@@ -87,6 +93,11 @@ class Settings:
     smtp_from: str = DEFAULT_SMTP_FROM
     smtp_starttls: bool = True
     smtp_ssl: bool = False
+    # The instance's own configuration store. Mail settings are written here,
+    # encrypted, by the Settings page. Headless ``.env`` remains the fallback.
+    settings_path: Path = field(default_factory=lambda: ROOT / "data" / "instance.db")
+    # Fernet key for that store. Never copied into logs or into the database.
+    secret_key: str | None = None
 
     @property
     def smtp_configured(self) -> bool:
@@ -97,11 +108,12 @@ class Settings:
         key_state = "set" if self.openrouter_api_key else "unset"
         embed_key = "set" if self.embedding_api_key else "unset"
         mail_state = "set" if self.smtp_configured else "unset"
+        secret_state = "set" if self.secret_key else "unset"
         return (
             f"Settings(db_backend={self.db_backend!r}, "
             f"model={self.openrouter_model!r}, api_key={key_state}, "
             f"embedding={self.embedding_provider!r}, embedding_key={embed_key}, "
-            f"smtp={mail_state})"
+            f"smtp={mail_state}, secret_key={secret_state})"
         )
 
 
@@ -206,6 +218,8 @@ def load_settings() -> Settings:
         sources_staging_dir=_resolve(os.environ.get("SOURCES_STAGING_DIR", ""), "data/staging"),
         alerts_path=_resolve(os.environ.get("ALERTS_PATH", ""), "data/alerts.db"),
         max_alert_window_days=max_alert_window_days,
+        settings_path=_resolve(os.environ.get("SETTINGS_PATH", ""), "data/instance.db"),
+        secret_key=_optional("DAY1_SECRET_KEY"),
         smtp_host=_optional("SMTP_HOST"),
         smtp_port=smtp_port,
         smtp_user=smtp_user,

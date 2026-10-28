@@ -168,6 +168,24 @@ Off is the default, and the page says so in one line and names the flag. Repoint
 
 Day 1 still signs in with a demo password. Settings is not a substitute for authentication on an instance exposed to the public.
 
+### What a test send may reach, and how often
+
+A test message leaves the company's authenticated mailbox. A page that will send to any address an operator types is therefore a relay for internal phishing from that mailbox, and it damages the sender reputation of the domain. So the recipient of a test message must be an address this instance already knows:
+
+* a recipient named on an alert definition,
+* an alert definition's owner, or
+* the operator's own address — which includes the address this instance sends from, so the mailbox can always be tested.
+
+Anything else is refused with the rule named, audited once as `settings_refused`, and not sent. What counts as known is what is saved (the stored transport, the user directory and the alert definitions), so a new `From` address is saved before it can be the recipient of a test.
+
+Test sends are also limited to **five per instance per fifteen minutes**. The count lives in the instance database (`SETTINGS_PATH`), not in the browser session: a reload, a second browser or a restart does not clear it. An attempt is counted before the transport is opened, so a failing relay consumes the quota too.
+
+### A rejected password stops delivery
+
+If the mail server rejects the password, the notifier does not retry it. Microsoft 365 and Google lock an account after a run of rejected logins, and the mailbox may be a person's only one, so delivery stops on the first rejection. Three consecutive authentication failures mark the definition failing: further attempts for it are refused before the transport is touched, and the owner gets **one** email saying what happened and how to fix it — an app password, entered in Settings, then a test message. A delivered message clears the mark, and the mark lapses six hours after the first failure so a fixed password is not blocked for ever.
+
+The Alerts page shows one delivery line per definition: **never sent**, **healthy**, **stale** (a success more than two days old), or **failing** with a count of consecutive failures. When the instance has no delivery records at all, the line says the records are unavailable rather than showing a healthy default.
+
 ## Try these
 
 - `What was total revenue by product over the last 90 days?` uses the revenue table.

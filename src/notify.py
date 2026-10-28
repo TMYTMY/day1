@@ -25,6 +25,18 @@ between attempts; the pause comes from an injected ``sleep`` so a test never
 waits. After the last attempt the notifier stops, and the definition's owner is
 notified exactly once that their alert could not be delivered.
 
+**An authentication failure is not retried.** A wrong password is a different
+kind of failure from a relay that is restarting: Microsoft 365 and Google lock
+an account after a run of rejected logins, and the mailbox may be a person's
+only one. So a rejected login ends the delivery on the spot, and
+:class:`src.send_safety.DeliveryGuard` counts the streak in the instance's alert
+database. At :data:`src.send_safety.AUTH_FAILURE_LIMIT` consecutive failures the
+definition is marked failing, later deliveries are refused before the transport
+is touched, and the owner is told once — not once per attempt, and not once per
+tick. A delivered message clears the streak. The guard is injected: a caller
+with no store gets the stop *within* a delivery (no retry) but no memory across
+ticks, and the notice it sends says so.
+
 No model call and no network happen anywhere in this module except inside
 ``SmtpSender.send`` (see docs/adr/0003-model-authors-definitions-not-execution.md).
 """
@@ -36,7 +48,7 @@ import ssl
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime, timezone
 from email.message import EmailMessage
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
@@ -49,6 +61,7 @@ from src.config import ConfigError, Settings
 from src.metrics import Metric
 from src.models import User
 from src.redaction import redact_exception, redact_transport_error
+from src.send_safety import AUTH_FAILURE_LIMIT, DeliveryGuard, Refusal
 
 if TYPE_CHECKING:  # the worker imports this module; this keeps that one-way
     from src.worker import FireOutcome
@@ -82,6 +95,46 @@ DELIVERY_STATUSES = (
     DELIVERY_NOT_WIRED,
     DELIVERY_NOT_A_FIRE,
 )
+
+# The SMTP codes a provider answers with when the credential is wrong. 535 is
+# "authentication failed"; 534 is "application-specific password required" (an
+# app password is needed); 530 and 538 are the "authentication required" pair a
+# tenant sends instead of 535 when it has disabled SMTP AUTH. They are listed
+# because treating one of them as a retryable relay error is how an account
+# gets locked.
+AUTH_CODES = frozenset({530, 534, 535, 538})
+
+# Words a wrapped or re-raised login failure keeps. A transport that raises a
+# plain OSError around the server's reply has no code left, so the text is the
+# only evidence; it is read here and nowhere else.
+_AUTH_WORDS = (
+    "authentication failed",
+    "authentication required",
+    "authenticate",
+    "invalid login",
+    "username and password not accepted",
+    "auth failed",
+    "bad credentials",
+    "application-specific password",
+)
+
+
+def is_auth_failure(exc: BaseException) -> bool:
+    """Whether this failure is the mail server rejecting the credential.
+
+    Only a rejected *credential* counts. A relay that is down, a port that is
+    wrong, a certificate that does not verify and a timeout are all retryable
+    conditions and none of them can lock an account; a rejected login is the one
+    failure where trying again is the harm.
+    """
+    if isinstance(exc, smtplib.SMTPAuthenticationError):
+        return True
+    code = getattr(exc, "smtp_code", None)
+    if isinstance(code, int) and code in AUTH_CODES:
+        return True
+    text = str(exc).lower()
+    return any(word in text for word in _AUTH_WORDS)
+
 
 # Why a recipient did not receive the email. The first two are the capability
 # reasons; the third is a person the directory no longer knows.
@@ -317,6 +370,14 @@ class Delivery:
     owner_notified: bool = False
     owner_error: str | None = None
     message: str = ""
+    # True when the mail server rejected the credential. The status stays
+    # ``failed`` — the worker already turns that into a failed run and a
+    # non-zero exit code — and this flag is what says *which* failure, so a
+    # caller does not have to read the error text.
+    auth_failed: bool = False
+    # True when the delivery was never attempted because the definition is
+    # already marked failing. ``attempts`` is 0 in that case.
+    stopped: bool = False
 
     @property
     def delivered(self) -> bool:
@@ -457,6 +518,73 @@ def compose_failure(
     return Notification(subject=subject, body=body)
 
 
+def compose_auth_failure(
+    *,
+    definition: AlertDefinition,
+    metric_title: str,
+    consecutive: int,
+    limit: int,
+    first_at: datetime,
+    error: str | None,
+    fire_key: str,
+    window_start: date,
+    window_end: date,
+    marked_failing: bool,
+) -> Notification:
+    """The single email a definition's owner gets when the password is rejected.
+
+    It is written for the person who can fix it, and it says three things: the
+    mailbox refused the credential this many times in a row, delivery has
+    stopped so the account is not locked, and the fix is one settings screen
+    away. It is not a per-attempt report — the caller sends it once per streak,
+    because a rejection notice for every attempt is itself a run of logins.
+    """
+    title = " ".join(metric_title.split())
+    subject = f"[Day 1] Mail authentication is failing for alert #{definition.id}: {title}"
+    state = (
+        f"Delivery for this definition is now stopped: {consecutive} authentication "
+        f"failures in a row (the limit is {limit}) since {first_at.strftime('%Y-%m-%dT%H:%M:%SZ')}. "
+        "Nothing more will be sent for it until the password works or the window "
+        "passes, so this mailbox is not driven into a provider lockout by our retries."
+        if marked_failing
+        else "Delivery for this fire was stopped on the first rejection rather than "
+        "retried, because repeating a rejected login is what locks an account."
+    )
+    body = "\n".join(
+        [
+            f"The mail server rejected the instance's mailbox password while delivering "
+            f"alert definition #{definition.id}.",
+            "",
+            f"Metric: {title}",
+            f"Window: {window_start.isoformat()} to {window_end.isoformat()}",
+            f"Recipients it was meant for: "
+            f"{join_names(list(definition.recipients)) or 'nobody'}",
+            f"Fire key: {fire_key}",
+            "",
+            state,
+            "",
+            "The server said:",
+            f"  {error or 'no detail was recorded'}",
+            "",
+            "How to fix it:",
+            "  1. Open Settings, then Mail settings, on this instance.",
+            "  2. Enter the mailbox password again. Most providers need an app "
+            "password here: Gmail wants a 16-character App Password with 2-Step "
+            "Verification on, and Microsoft 365 needs an app password — or SMTP AUTH "
+            "enabled for the mailbox — which the tenant may have turned off.",
+            "  3. Save, then send a test message to your own address. A test message "
+            "that arrives means the next scheduled run will deliver.",
+            "",
+            "Do not save the same password again to \"try it\": each attempt is another "
+            "rejected login against the account.",
+            "",
+            f"Definition owner: {definition.owner}",
+            "",
+        ]
+    )
+    return Notification(subject=subject, body=body)
+
+
 # --- the notifier ----------------------------------------------------------
 
 
@@ -481,6 +609,9 @@ class Notifier:
         sleep: Callable[[float], None] | None = None,
         attempts: int = MAX_ATTEMPTS,
         backoff: Sequence[float] = BACKOFF_SECONDS,
+        guard: DeliveryGuard | None = None,
+        auth_limit: int = AUTH_FAILURE_LIMIT,
+        clock: Callable[[], datetime] | None = None,
     ):
         self.sender = sender
         self.users_path = Path(users_path)
@@ -488,6 +619,43 @@ class Notifier:
         self._sleep = sleep or time.sleep
         self._attempts = max(1, int(attempts))
         self._backoff = tuple(float(seconds) for seconds in backoff)
+        # The store that remembers rejected logins per definition. None means
+        # this caller has no store, which is a supported state (a library call,
+        # a test, a worker built before the guard existed): the stop then holds
+        # inside one delivery, and the notice says it is the only one.
+        self._guard = guard
+        self._auth_limit = max(1, int(auth_limit))
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
+
+    @classmethod
+    def from_settings(
+        cls,
+        settings: Settings,
+        *,
+        sender: MailSender | None,
+        titles: Mapping[str, str] | None = None,
+        sleep: Callable[[float], None] | None = None,
+        clock: Callable[[], datetime] | None = None,
+    ) -> Notifier:
+        """Build the notifier a deployment uses, with its guard wired to the instance.
+
+        The guard belongs beside the fire log in the instance's alert database,
+        because that is the only place a fact about delivery outlives the
+        process that learned it. Building ``Notifier`` directly is still legal
+        and is what the tests do; it just has no memory across ticks.
+        """
+        return cls(
+            sender=sender,
+            users_path=settings.users_path,
+            titles=titles,
+            sleep=sleep,
+            guard=DeliveryGuard(settings.alerts_path),
+            clock=clock,
+        )
+
+    @property
+    def guard(self) -> DeliveryGuard | None:
+        return self._guard
 
     def deliver(self, outcome: FireOutcome, metric: Metric) -> Delivery:
         """Compose, re-check, send, retry, and report. Never raises for a send."""
@@ -504,6 +672,20 @@ class Notifier:
                 status=DELIVERY_NOT_WIRED,
                 fire_key=fire_key,
                 message="No mail sender is configured, so no notification was sent.",
+            )
+
+        # Before composing or addressing anything: has this definition already
+        # been marked failing? A refusal here is the whole point of the guard —
+        # the transport is not touched, so no credential is presented again.
+        stopped = self._stopped(definition)
+        if stopped is not None:
+            return Delivery(
+                status=DELIVERY_FAILED,
+                fire_key=fire_key,
+                error=f"{stopped.reason}: {stopped.message}",
+                message=stopped.message,
+                auth_failed=True,
+                stopped=True,
             )
 
         permitted, blocked = self._permitted(definition, metric)
@@ -526,8 +708,8 @@ class Notifier:
 
         error: str | None = None
         attempts = 0
-        for attempt in range(1, self._attempts + 1):
-            attempts = attempt
+        while attempts < self._attempts:
+            attempts += 1
             try:
                 self.sender.send(message)
             except Exception as exc:  # a transport failure is data, not a crash
@@ -535,10 +717,23 @@ class Notifier:
                 # quote the AUTH line, and this string goes into an audit row,
                 # the owner's email and the fire's message.
                 detail = redact_transport_error(exc, sender=self.sender)
-                error = f"attempt {attempt} of {self._attempts} failed: {detail}"
-                if attempt < self._attempts:
-                    self._sleep(self._backoff[min(attempt - 1, len(self._backoff) - 1)])
+                if is_auth_failure(exc):
+                    # A rejected password is the one failure where the retry is
+                    # the harm: providers count them, and the account may be a
+                    # person's only mailbox.
+                    return self._auth_failure(
+                        definition=definition,
+                        metric=metric,
+                        blocked=blocked,
+                        outcome=outcome,
+                        attempt=attempts,
+                        detail=detail,
+                    )
+                error = f"attempt {attempts} of {self._attempts} failed: {detail}"
+                if attempts < self._attempts:
+                    self._sleep(self._backoff[min(attempts - 1, len(self._backoff) - 1)])
                 continue
+            self._record_success(definition)
             return Delivery(
                 status=DELIVERY_DELIVERED,
                 fire_key=fire_key,
@@ -555,6 +750,7 @@ class Notifier:
                 ),
             )
 
+        self._record_failure(definition, error)
         owner_notified, owner_error = self._notify_owner(
             definition=definition,
             metric_title=metric.title,
@@ -588,6 +784,188 @@ class Notifier:
                 )
             ),
         )
+
+    # -- the authentication stop --------------------------------------------
+
+    def _stopped(self, definition: AlertDefinition) -> Refusal | None:
+        """The guard's answer for this definition, or None when it may send.
+
+        A store that cannot be read answers None. Refusing every delivery
+        because a table is missing would silence the alerts this guard exists to
+        protect, and the transport's own failure is still recorded and reported
+        below, so the honest failure is the one a person can see.
+        """
+        if self._guard is None:
+            return None
+        try:
+            return self._guard.refusal(definition.id, now=self._clock())
+        except Exception:  # noqa: BLE001 - a broken store must not stop delivery
+            return None
+
+    def _record_success(self, definition: AlertDefinition) -> None:
+        """Clear this definition's streak, because a message just got through."""
+        if self._guard is None:
+            return
+        try:
+            self._guard.record_success(definition.id, at=self._clock())
+        except Exception:  # noqa: BLE001 - the email is what matters, not the note
+            return
+
+    def _record_failure(self, definition: AlertDefinition, error: str | None) -> None:
+        """Record a non-authentication failure, so the health line can count it."""
+        if self._guard is None:
+            return
+        try:
+            self._guard.record_failure(definition.id, at=self._clock(), error=error)
+        except Exception:  # noqa: BLE001
+            return
+
+    def _auth_failure(
+        self,
+        *,
+        definition: AlertDefinition,
+        metric: Metric,
+        blocked: tuple[Blocked, ...],
+        outcome: FireOutcome,
+        attempt: int,
+        detail: str,
+    ) -> Delivery:
+        """Stop on a rejected credential: no retry, one notice, a recorded streak.
+
+        The one thing this must not do is try again: a rejected login is exactly
+        the failure a provider counts towards a lockout. The streak is recorded
+        in the guard so the *next* fire — another process, hours later — knows
+        about it, and the owner is told once per streak.
+
+        The notice is marked as sent even when sending it failed, because that
+        send is itself another login attempt against a mailbox that is already
+        rejecting them. Trying the notice again every tick is the retry loop
+        this function exists to remove.
+        """
+        error = (
+            "authentication_failed: the mail server rejected the password "
+            f"(attempt {attempt}; a rejected login is not retried, because repeating "
+            f"it is what locks a mailbox): {detail}"
+        )
+        stop = None
+        if self._guard is not None:
+            try:
+                stop = self._guard.record_auth_failure(
+                    definition.id, at=self._clock(), error=error
+                )
+            except Exception:  # noqa: BLE001 - the failure is still reported below
+                stop = None
+        consecutive = stop.consecutive if stop is not None else 1
+        limit = stop.limit if stop is not None else self._auth_limit
+        first_at = stop.first_at if stop is not None else self._clock()
+        marked = bool(stop.marked_failing) if stop is not None else False
+        should_notify = bool(stop.should_notify) if stop is not None else True
+
+        owner_notified, owner_error = (False, None)
+        if should_notify:
+            owner_notified, owner_error = self._notify_owner_auth(
+                definition=definition,
+                metric_title=metric.title,
+                consecutive=consecutive,
+                limit=limit,
+                first_at=first_at,
+                error=error,
+                fire_key=outcome.fire_key,
+                window_start=outcome.window_start,
+                window_end=outcome.window_end,
+                marked_failing=marked,
+            )
+            if self._guard is not None:
+                try:
+                    self._guard.mark_notified(definition.id, at=self._clock())
+                except Exception:  # noqa: BLE001
+                    pass
+
+        if stop is None:
+            persistence = (
+                "This instance has no delivery-health store wired, so this notice "
+                "covers this fire only: the next fire will try the mailbox again."
+            )
+        elif marked:
+            persistence = (
+                f"Delivery for this definition is stopped at {limit} consecutive "
+                "authentication failures; it resumes when the password works or the "
+                "window passes."
+            )
+        else:
+            persistence = (
+                f"{consecutive} of {limit} consecutive authentication failures recorded "
+                "for this definition."
+            )
+        if owner_notified:
+            notice = (
+                f"The owner {definition.owner} was notified once and will not be told "
+                "again for this streak."
+            )
+        else:
+            notice = f"The owner {definition.owner} could not be notified" + (
+                f" ({owner_error})." if owner_error else "."
+            )
+        return Delivery(
+            status=DELIVERY_FAILED,
+            fire_key=outcome.fire_key,
+            recipients=(),
+            blocked=blocked,
+            attempts=attempt,
+            error=error,
+            owner_notified=owner_notified,
+            owner_error=owner_error,
+            auth_failed=True,
+            message=(
+                f"Delivery failed: the mail server rejected the password on attempt "
+                f"{attempt}, and nothing was retried. {persistence} {notice}"
+            ),
+        )
+
+    def _notify_owner_auth(
+        self,
+        *,
+        definition: AlertDefinition,
+        metric_title: str,
+        consecutive: int,
+        limit: int,
+        first_at: datetime,
+        error: str,
+        fire_key: str,
+        window_start: date,
+        window_end: date,
+        marked_failing: bool,
+    ) -> tuple[bool, str | None]:
+        """Send the one notice about a rejected password. Not a retry loop."""
+        owner = user_named(definition.owner, self.users_path)
+        if owner is None:
+            return False, f"the owner {definition.owner} is no longer in the user directory"
+        notification = compose_auth_failure(
+            definition=definition,
+            metric_title=metric_title,
+            consecutive=consecutive,
+            limit=limit,
+            first_at=first_at,
+            error=error,
+            fire_key=fire_key,
+            window_start=window_start,
+            window_end=window_end,
+            marked_failing=marked_failing,
+        )
+        message = MailMessage(
+            to=(address_for(owner),),
+            subject=notification.subject,
+            body=notification.body,
+            fire_key=fire_key,
+        )
+        try:
+            assert self.sender is not None  # deliver() checked this already
+            self.sender.send(message)
+        except Exception as exc:
+            return False, (
+                "sending it also failed: " + redact_transport_error(exc, sender=self.sender)
+            )
+        return True, None
 
     # -- the recipient check ------------------------------------------------
 

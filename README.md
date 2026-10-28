@@ -203,6 +203,11 @@ The flags are the point: every label ships `reviewed: false`, and the harness pr
 | `KNOWLEDGE_PATH` | On-disk index directory. Default `data/knowledge`. |
 | `ALERTS_PATH` | The instance's alert database: definitions and fires. Default `data/alerts.db`. Two instances must never share it. |
 | `MAX_ALERT_WINDOW_DAYS` | The longest window an alert definition may name, in days. Default 365. A longer window is refused with this number in the message; it is never clamped. |
+| `SMTP_HOST` | The mail host a fire is delivered through. Unset means the worker refuses to start: nothing is evaluated and dropped. |
+| `SMTP_PORT` | Submission port. Default 587. |
+| `SMTP_USER`, `SMTP_PASSWORD` | Credentials for the relay. Optional: a local relay that needs none is left alone. |
+| `SMTP_FROM` | The from-address on a notification. Defaults to `SMTP_USER` when that is an address, then to `day1-alerts@localhost`. |
+| `SMTP_STARTTLS` | `true` (default) asks the relay to upgrade the connection. `0`, `false`, `no`, or `off` turns it off. |
 | `SEED_END` | Last date in the seeded demo window (`YYYY-MM-DD`). Default: three days before today, so the demo data does not age. The window is 119 days long and the file rebuilds when the date changes. |
 
 The API key and database password are read from the environment inside the server process. They are not written into the prompt, the page, or the export.
@@ -251,7 +256,7 @@ python -m src.worker                          # one tick, then exit
 python -m src.worker --loop --interval 300    # a long-running process instead
 ```
 
-A tick considers every confirmed definition and every paused one, and writes exactly one audit event per definition it considered, whatever happened: `alert_fired`, `alert_not_fired`, `alert_insufficient_data`, `alert_duplicate`, `alert_skipped` (paused), `alert_run_refused`, `alert_failed`. A draft and a superseded definition are not considered and not audited, because neither is scheduled.
+A tick considers every confirmed definition and every paused one, and writes exactly one outcome audit event per definition it considered, whatever happened: `alert_fired`, `alert_not_fired`, `alert_insufficient_data`, `alert_duplicate`, `alert_skipped` (paused), `alert_run_refused`, `alert_suppressed`, `alert_failed`. A draft and a superseded definition are not considered and not audited, because neither is scheduled.
 
 A fire is identified by a fire key — the definition's row id plus the resolved window end — and that key carries a `UNIQUE` constraint in the instance's alert database (`ALERTS_PATH`). A restart, a double launch or two overlapping ticks therefore cannot evaluate the same window twice: the second claim loses the insert, records `alert_duplicate`, and runs no SQL. The window ends on the last complete day before the fire date, so two ticks on the same day before and after the definition's local time are two periods, while two ticks inside one period are one.
 
@@ -259,7 +264,20 @@ One fire runs one statement — the metric's `measure` summed over the window �
 
 A metric with no `measure` cannot be alerted on: `src/alerts.py` refuses the draft with `metric_no_measure`, because an alert compares a number and a definition with nothing to sum could only fail at fire time. `revenue_by_product` names `revenue_usd`; the placeholder metrics name nothing and are refused as placeholders before the measure is considered.
 
-Delivery is a later capability (#21). A tick writes an audit row and a fire row and returns one outcome per definition, carrying the definition (metric, comparison, constant, recipients), the fire key, the window, the value, the previous value and the verdict. Nothing is sent.
+Delivery is `src/notify.py` (#21). A fire whose comparison triggered produces one plain-text email per definition, addressed to every recipient who **may still read the metric**:
+
+- Each recipient is re-resolved through `user_named()` and re-checked through `authorize(user, "alert", (metric.table,))` **at fire time**, not only when the definition was written. A role can lose a table under a stored definition, and the email it would have received is exactly the leak the capability gate exists to stop.
+- A recipient who no longer passes is skipped, and the skip is its own audit event (`alert_recipient_blocked`, status `denied`) naming that person, the definition, the fire key, and the reason. The recipients who still pass receive the email.
+- When **every** recipient is blocked, nothing is sent and the fire is recorded as `alert_suppressed` with status `suppressed` — not `ok`, and the tick exits non-zero. A breach nobody could be told about is not a success.
+- The email carries the metric title, the value, the window and its end date, the condition and constant that triggered it, the metric definition currently in force with its owner and `effective_from`, and the fire key as the audit reference.
+- Delivery goes through `MailSender` — one `send(message)` method. `SmtpSender` is the only code that opens a socket and connects inside `send`; `RecordingSender` is the in-memory seam the tests inject, so no test touches the network.
+- A failed delivery is retried at most three times with a pause between attempts (the pause is injected, so a test never waits). After the third failure the fire stops, the terminal event `alert_delivery_failed` is written, and the definition's owner receives exactly one email saying what was missed and why.
+
+The scheduled command refuses to run when `SMTP_HOST` is unset: it writes `alert_delivery_unconfigured`, prints the reason, and exits `2` without ticking. A cron job that evaluates fires and quietly delivers nothing looks healthy while losing the breach it found, which is worse than a job that does not start.
+
+```bash
+SMTP_HOST=mail.example.com SMTP_FROM=alerts@example.com python -m src.worker
+```
 
 Cron:
 
@@ -293,7 +311,7 @@ Persistent=true
 WantedBy=timers.target
 ```
 
-The exit code is 0 when the tick ran, and 1 when a definition was refused or failed to evaluate, so cron and systemd surface the trouble instead of swallowing it.
+The exit code is 0 when the tick ran, and 1 when a definition was refused, failed to evaluate, failed to deliver, or fired with nobody able to receive it. `2` means the worker refused to start at all because no mail transport is configured. Cron and systemd surface each one instead of swallowing it — set `MAILTO` (cron) or `OnFailure=` (systemd) on the unit if you want the failure in your inbox as well as the log.
 
 ## Swap in Postgres or Athena
 
@@ -306,7 +324,7 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-The tests cover routing, the role map, the capability gate and its refusals, the SELECT allowlist, blocked writes, CSV/HTML export, the revenue, DAU, unknown-topic, and permission paths, the knowledge base (upload, search, delete, and notes that do not replace routing), alert definitions with their refusals, and the alert worker (the comparison, the fire key under a restart and a race, skipped paused definitions, and one audit event per definition considered). The retrieval harness, the label review gate, the note ablation, the seeded window, and the answer-cache identity have their own tests. Nothing in the suite asserts a retrieval score — the numbers above are measured by the script, so a regression shows up as a number that moved, not as a test that was quietly loosened.
+The tests cover routing, the role map, the capability gate and its refusals, the SELECT allowlist, blocked writes, CSV/HTML export, the revenue, DAU, unknown-topic, and permission paths, the knowledge base (upload, search, delete, and notes that do not replace routing), alert definitions with their refusals, and the alert worker (the comparison, the fire key under a restart and a race, skipped paused definitions, one audit event per definition considered). Notification delivery has its own tests: the composed email, the fire-time recipient re-check being the one that skips a recipient (with the others still mailed), an all-blocked fire recorded as suppressed with nothing sent, three failed attempts ending in one owner notification, a duplicate tick sending nothing, and a delivery that runs with every socket function replaced so a regression is an error rather than a real connection. The retrieval harness, the label review gate, the note ablation, the seeded window, and the answer-cache identity have their own tests. Nothing in the suite asserts a retrieval score — the numbers above are measured by the script, so a regression shows up as a number that moved, not as a test that was quietly loosened.
 
 ## Copyright
 

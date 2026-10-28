@@ -16,17 +16,27 @@ What one tick does, for each definition that is live or paused:
 4. Sum the metric's measure over the window through the read-only adapter, so
    the statement passes the same SELECT allowlist as a asked question.
 5. Compare the sum with the constant, record the fire, and write one audit row.
+6. If the comparison triggered, deliver the notification through
+   ``src.notify``: each recipient is re-resolved and re-authorized *now*, the
+   permitted ones receive one email, and the blocked ones are skipped and named
+   in an audit row of their own (see ``src/notify.py`` and ticket #21).
 
-Every definition considered produces exactly one audit event, whatever
+Every definition considered produces exactly one outcome audit event, whatever
 happened: fired, did not fire, too little data, duplicate, skipped because
-paused, refused, or failed. A paused definition is considered — it is audited
-as skipped — and is never evaluated.
+paused, refused, suppressed, or failed. A per-recipient refusal is an
+additional event, because it names a person rather than the definition. A
+paused definition is considered — it is audited as skipped — and is never
+evaluated.
 
-A tick writes audit rows and fire rows. It does not send anything: a
-``FireOutcome`` with ``should_notify`` true is the input the notification
-capability (ticket #21) consumes, and it carries the definition, the fire key,
-the window, the value, the previous value and the verdict so that consumer
-never has to re-derive one.
+A tick writes audit rows, fire rows, and at most one email per triggering fire.
+An all-blocked fire is ``suppressed``: nothing was sent, and that is recorded as
+its own outcome rather than as a success. A delivery that fails three times
+stops, is recorded as ``failed`` with a terminal event, and tells the
+definition's owner once.
+
+The scheduled command refuses to run when no mail transport is configured. A
+cron job that ticks and quietly delivers nothing is the worst outcome, so a
+missing ``SMTP_HOST`` is an audited refusal with a non-zero exit code.
 """
 
 from __future__ import annotations
@@ -57,6 +67,16 @@ from src.db.factory import build_adapter
 from src.fires import FireStore
 from src.metrics import Metric, definition_hash, measure_column
 from src.models import User
+from src.notify import (
+    DELIVERY_DELIVERED,
+    DELIVERY_FAILED,
+    DELIVERY_SUPPRESSED,
+    Delivery,
+    MailSender,
+    Notifier,
+    build_sender,
+    missing_smtp,
+)
 from src.routing import Catalog, load_catalog
 
 # The actor every worker-written audit row names. A fire is not a person's
@@ -72,6 +92,9 @@ OUTCOME_DUPLICATE = "duplicate"
 OUTCOME_SKIPPED = "skipped"
 OUTCOME_REFUSED = "refused"
 OUTCOME_FAILED = "failed"
+# The comparison triggered, but nobody who was named may still read the metric,
+# so no notification was sent. Not a success: a breach reported to no one.
+OUTCOME_SUPPRESSED = "suppressed"
 OUTCOMES = (
     OUTCOME_FIRED,
     OUTCOME_NOT_FIRED,
@@ -80,11 +103,14 @@ OUTCOMES = (
     OUTCOME_SKIPPED,
     OUTCOME_REFUSED,
     OUTCOME_FAILED,
+    OUTCOME_SUPPRESSED,
 )
 
 # The outcomes an operator has to do something about, and the exit code that
-# says so. A cron job that fails quietly is worse than one that mails.
-_ATTENTION = frozenset({OUTCOME_REFUSED, OUTCOME_FAILED})
+# says so. A cron job that fails quietly is worse than one that mails. A
+# suppressed fire belongs here: it fired and reached nobody, which is exactly
+# the silence this feature exists to prevent.
+_ATTENTION = frozenset({OUTCOME_REFUSED, OUTCOME_FAILED, OUTCOME_SUPPRESSED})
 
 # Audit event types. The capability is always ``alert``; the event type says
 # which outcome this run was, so one grep answers "what did the worker do".
@@ -95,6 +121,13 @@ EVENT_DUPLICATE = "alert_duplicate"
 EVENT_SKIPPED = "alert_skipped"
 EVENT_REFUSED = "alert_run_refused"
 EVENT_FAILED = "alert_failed"
+EVENT_SUPPRESSED = "alert_suppressed"
+# Delivery events. A blocked recipient is its own event because it names one
+# person; a delivery that never got through is the terminal failure event.
+EVENT_RECIPIENT_BLOCKED = "alert_recipient_blocked"
+EVENT_DELIVERY_FAILED = "alert_delivery_failed"
+# The scheduled command refused to start because it had no mail transport.
+EVENT_DELIVERY_UNCONFIGURED = "alert_delivery_unconfigured"
 
 _EVENT_FOR = {
     OUTCOME_FIRED: EVENT_FIRED,
@@ -104,6 +137,7 @@ _EVENT_FOR = {
     OUTCOME_SKIPPED: EVENT_SKIPPED,
     OUTCOME_REFUSED: EVENT_REFUSED,
     OUTCOME_FAILED: EVENT_FAILED,
+    OUTCOME_SUPPRESSED: EVENT_SUPPRESSED,
 }
 
 _STATUS_FOR = {
@@ -114,6 +148,8 @@ _STATUS_FOR = {
     OUTCOME_SKIPPED: "skipped",
     OUTCOME_REFUSED: "denied",
     OUTCOME_FAILED: "failed",
+    # Neither ok nor failed: the fire was real and the audience was empty.
+    OUTCOME_SUPPRESSED: "suppressed",
 }
 
 _OUTCOME_FOR_VERDICT = {
@@ -122,12 +158,25 @@ _OUTCOME_FOR_VERDICT = {
     INSUFFICIENT_DATA: OUTCOME_INSUFFICIENT,
 }
 
+
+def _event_type(outcome: str, delivery: Delivery | None) -> str:
+    """The audit event type for one outcome, naming a delivery failure as one."""
+    if outcome == OUTCOME_FAILED and delivery is not None and delivery.status == DELIVERY_FAILED:
+        return EVENT_DELIVERY_FAILED
+    return _EVENT_FOR[outcome]
+
+
 # The day a window is measured on. Every table the catalogue binds records one
 # row per event_date, so a window is a date range on that column.
 EVENT_DATE = "event_date"
 VALUE_ALIAS = "value"
 
 DEFAULT_INTERVAL_SECONDS = 300
+
+# The exit code when the command refuses to start because it could not deliver a
+# fire. 1 is "a definition was refused or failed"; 2 is "the worker itself is
+# not fit to run", which is a different thing for whoever reads the alert mail.
+EXIT_UNCONFIGURED = 2
 
 _IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
@@ -158,15 +207,14 @@ def sum_sql(metric: Metric, measure: str, window: Window) -> str:
 class FireOutcome:
     """What one considered definition produced, in full.
 
-    This is the hand-off to the notification capability: it carries the
-    definition (metric, comparison, constant, recipients, owner), the fire key,
-    the window, the value, the previous value the comparison used, and the
-    verdict. Nothing here needs a database to read, and nothing here has been
-    sent to anybody.
+    This is the record of one fire: it carries the definition (metric,
+    comparison, constant, recipients, owner), the fire key, the window, the
+    value, the previous value the comparison used, the verdict, and — when the
+    comparison triggered — what happened to the notification (``delivery``).
 
-    ``outcome`` is the run's result (``fired``, ``duplicate``, ``skipped``…);
-    ``verdict`` is the comparison's, and is present only when a comparison was
-    actually made.
+    ``outcome`` is the run's result (``fired``, ``duplicate``, ``skipped``,
+    ``suppressed``…); ``verdict`` is the comparison's, and is present only when
+    a comparison was actually made.
     """
 
     definition: AlertDefinition
@@ -182,6 +230,9 @@ class FireOutcome:
     message: str = ""
     error: str | None = None
     audited: bool = True
+    # Absent when the comparison did not trigger, when the definition was never
+    # evaluated, or when the worker has no sender wired at all.
+    delivery: Delivery | None = None
 
     @property
     def should_notify(self) -> bool:
@@ -191,6 +242,11 @@ class FireOutcome:
     @property
     def recipients(self) -> tuple[str, ...]:
         return self.definition.recipients
+
+    @property
+    def notification_recipients(self) -> tuple[str, ...]:
+        """Who the notification actually reached. Empty when nothing was sent."""
+        return () if self.delivery is None else self.delivery.recipients
 
     @property
     def alert_id(self) -> int:
@@ -248,6 +304,7 @@ class Worker:
         fires: FireStore,
         titles: dict[str, str] | None = None,
         clock: Callable[[], datetime] | None = None,
+        notifier: Notifier | None = None,
     ):
         self.service = service
         self.adapter = adapter
@@ -255,6 +312,11 @@ class Worker:
         self._titles = dict(titles or {})
         # The one clock. Tests pass a fixed time; nothing here sleeps.
         self._clock = clock or _utc_now
+        # The delivery seam. None means this worker has no mail transport at
+        # all: it evaluates and audits, and sends nothing. The scheduled
+        # command never runs in that state (see ``main``), so the only way to
+        # get here is a library call or a test.
+        self.notifier = notifier
 
     @classmethod
     def from_settings(
@@ -264,16 +326,33 @@ class Worker:
         audit: AuditLog | None = None,
         catalog: Catalog | None = None,
         clock: Callable[[], datetime] | None = None,
+        sender: MailSender | None = None,
+        sleep: Callable[[float], None] | None = None,
     ) -> Worker:
-        """Build the worker the way a deployment does: everything from settings."""
+        """Build the worker the way a deployment does: everything from settings.
+
+        ``sender`` overrides the transport the settings describe, which is what
+        a test injects. Without an override the sender comes from ``SMTP_*``;
+        when those are unset there is no sender, and the notifier reports that
+        rather than pretending a notification was sent. ``sleep`` is the pause
+        between delivery attempts, injected so no test waits.
+        """
         log = audit if audit is not None else AuditLog(settings.audit_path)
         routes = catalog if catalog is not None else load_catalog(settings.routing_path)
+        titles = _topic_titles(routes)
+        transport = sender if sender is not None else build_sender(settings)
         return cls(
             service=AlertService.from_settings(settings, audit=log, catalog=routes),
             adapter=build_adapter(settings),
             fires=FireStore(settings.alerts_path),
-            titles=_topic_titles(routes),
+            titles=titles,
             clock=clock,
+            notifier=Notifier(
+                sender=transport,
+                users_path=settings.users_path,
+                titles=titles,
+                sleep=sleep,
+            ),
         )
 
     # -- one tick ---------------------------------------------------------
@@ -378,18 +457,32 @@ class Worker:
             previous=evaluation.previous,
             verdict=evaluation.verdict,
         )
+        outcome = _OUTCOME_FOR_VERDICT[evaluation.verdict]
+        message = self._message(definition, window, evaluation)
+        delivery: Delivery | None = None
+        if outcome == OUTCOME_FIRED:
+            delivery = self._deliver(definition, metric, window, key, evaluation)
+            outcome, message, error, status = self._apply_delivery(outcome, message, delivery)
+            if delivery is not None:
+                for skipped in delivery.blocked:
+                    self._record_blocked(definition, metric, window, key, skipped)
+        else:
+            error, status = None, None
         return self._record(
             definition,
-            _OUTCOME_FOR_VERDICT[evaluation.verdict],
+            outcome,
             window,
             key,
             metric=metric,
-            message=self._message(definition, window, evaluation),
+            message=message,
             value=evaluation.value,
             previous=evaluation.previous,
             verdict=evaluation.verdict,
             previous_window_end=evaluation.previous_window_end,
+            error=error,
+            status=status,
             sql=evaluation.sql,
+            delivery=delivery,
         )
 
     # -- resolving and evaluating ----------------------------------------
@@ -454,6 +547,123 @@ class Worker:
                 return metric
         return None
 
+    # -- delivery ---------------------------------------------------------
+
+    def _deliver(
+        self,
+        definition: AlertDefinition,
+        metric: Metric | None,
+        window: Window,
+        key: str,
+        evaluation: _Evaluation,
+    ) -> Delivery | None:
+        """Hand this fire to the notifier, when the worker has one wired.
+
+        The hand-off is the outcome itself, built here without an audit row so
+        the delivery can be part of it: the notifier never re-reads the
+        warehouse, the comparison, or the definition.
+
+        A metric cannot be missing at this point — a fire without one is
+        refused before any SQL — but the guard keeps the type honest rather than
+        asserting a thing a reader cannot check.
+        """
+        if self.notifier is None or metric is None:
+            return None
+        handoff = FireOutcome(
+            definition=definition,
+            outcome=OUTCOME_FIRED,
+            fire_key=key,
+            window_start=window.start,
+            window_end=window.end,
+            value=evaluation.value,
+            previous=evaluation.previous,
+            verdict=evaluation.verdict,
+            previous_window_end=evaluation.previous_window_end,
+            metric_title=" ".join(metric.title.split()),
+        )
+        try:
+            return self.notifier.deliver(handoff, metric)
+        except Exception as exc:
+            # A notification that cannot even be prepared is this definition's
+            # failure, not the tick's. Every other definition still runs, which
+            # is the same rule the evaluation path follows.
+            return Delivery(
+                status=DELIVERY_FAILED,
+                fire_key=key,
+                error=f"notification_failed: {exc}",
+                message=f"The notification could not be prepared: {exc}.",
+            )
+
+    @staticmethod
+    def _apply_delivery(
+        outcome: str,
+        message: str,
+        delivery: Delivery | None,
+    ) -> tuple[str, str, str | None, str | None]:
+        """Turn a delivery result into the fire's outcome, message and audit error.
+
+        Delivered keeps the fire a fire. An empty audience makes it
+        ``suppressed`` — the comparison triggered and nobody was told, which is
+        not a success and must not read like one. Three failed attempts make it
+        ``failed``, with the transport's own words in the audit row.
+        """
+        if delivery is None:
+            return outcome, message, None, None
+        if delivery.status == DELIVERY_DELIVERED:
+            return OUTCOME_FIRED, f"{message} {delivery.message}", None, None
+        if delivery.status == DELIVERY_SUPPRESSED:
+            return (
+                OUTCOME_SUPPRESSED,
+                f"{message} {delivery.message}",
+                f"all_recipients_blocked: {delivery.message}",
+                "suppressed",
+            )
+        if delivery.status == DELIVERY_FAILED:
+            return OUTCOME_FAILED, f"{message} {delivery.message}", delivery.error, "failed"
+        # Not wired, or not a fire: the comparison's outcome stands, and the
+        # message says why nothing was sent.
+        return outcome, f"{message} {delivery.message}", None, None
+
+    def _record_blocked(
+        self,
+        definition: AlertDefinition,
+        metric: Metric | None,
+        window: Window,
+        key: str,
+        blocked: object,
+    ) -> None:
+        """One audit event per recipient this fire could not reach.
+
+        It names the person, the definition and the fire key, so the question
+        "why did Alex not get the revenue alert?" is one grep rather than an
+        argument. A refusal here is per-recipient: the others still received
+        the email, and this row says who did not.
+        """
+        username = getattr(blocked, "username", "")
+        reason = getattr(blocked, "reason", "not_allowed")
+        detail = getattr(blocked, "message", "")
+        try:
+            self.service.audit.record_event(
+                username=WORKER_USERNAME,
+                role=WORKER_ROLE,
+                status="denied",
+                event_type=EVENT_RECIPIENT_BLOCKED,
+                capability=ALERT,
+                question=(
+                    f"blocked alert recipient {username} for definition #{definition.id} "
+                    f"window {window.start} to {window.end} fire_key {key} ({reason})"
+                ),
+                tables=(metric.table,) if metric is not None else (),
+                sql=None,
+                row_count=None,
+                error=f"{reason}: {detail}",
+                metric_id=None if metric is None else metric.id,
+                definition_hash=None if metric is None else definition_hash(metric),
+            )
+        except Exception:
+            # A failed audit write must not stop the other recipients' email.
+            return
+
     @staticmethod
     def _message(definition: AlertDefinition, window: Window, evaluation: _Evaluation) -> str:
         value = "no rows" if evaluation.value is None else f"{evaluation.value:,.2f}"
@@ -490,8 +700,9 @@ class Worker:
         error: str | None = None,
         status: str | None = None,
         sql: str | None = None,
+        delivery: Delivery | None = None,
     ) -> FireOutcome:
-        """Write exactly one audit event for this definition, and return the outcome."""
+        """Write exactly one outcome audit event for this definition, and return it."""
         audited = self._audit(
             definition,
             outcome,
@@ -502,6 +713,7 @@ class Worker:
             error=error,
             status=status or _STATUS_FOR[outcome],
             sql=sql,
+            delivery=delivery,
         )
         return FireOutcome(
             definition=definition,
@@ -517,6 +729,7 @@ class Worker:
             message=message if audited else f"{message} The usage log could not be written.",
             error=error,
             audited=audited,
+            delivery=delivery,
         )
 
     def _audit(
@@ -531,8 +744,17 @@ class Worker:
         error: str | None,
         status: str,
         sql: str | None,
+        delivery: Delivery | None = None,
     ) -> bool:
-        """One row per considered definition, through the shared writer."""
+        """One outcome row per considered definition, through the shared writer.
+
+        A fire that reached somebody says so in the same row, so the audit trail
+        answers "was it sent, and to whom" without a second table. A delivery
+        that never got through writes the terminal failure event
+        (``alert_delivery_failed``) instead of ``alert_failed``, because the
+        difference between "the sum failed" and "the email failed" is the whole
+        of what an operator has to fix.
+        """
         question = (
             f"{outcome} alert definition #{definition.id} "
             f"window {window.start} to {window.end} "
@@ -540,12 +762,18 @@ class Worker:
             f"({definition.comparison} {definition.constant:g}, "
             f"owner {definition.owner})"
         )
+        if delivery is not None:
+            question += f" notify {delivery.status}"
+            if delivery.recipients:
+                question += f":{','.join(delivery.recipients)}"
+            if delivery.blocked:
+                question += f" skipped:{','.join(item.username for item in delivery.blocked)}"
         try:
             self.service.audit.record_event(
                 username=WORKER_USERNAME,
                 role=WORKER_ROLE,
                 status=status,
-                event_type=_EVENT_FOR[outcome],
+                event_type=_event_type(outcome, delivery),
                 capability=ALERT,
                 question=question,
                 tables=(metric.table,) if metric is not None else (),
@@ -568,17 +796,57 @@ def _report(outcomes: list[FireOutcome]) -> int:
     for outcome in outcomes:
         value = "" if outcome.value is None else f" value={outcome.value:.2f}"
         previous = "" if outcome.previous is None else f" previous={outcome.previous:.2f}"
+        delivery = ""
+        if outcome.delivery is not None:
+            delivery = f" notify={outcome.delivery.status}"
+            if outcome.delivery.recipients:
+                delivery += f":{','.join(outcome.delivery.recipients)}"
+            if outcome.delivery.blocked:
+                delivery += f" skipped:{','.join(item.username for item in outcome.delivery.blocked)}"
         print(
             f"{outcome.outcome:<17} alert #{outcome.alert_id:<4} "
             f"{outcome.window_start}..{outcome.window_end}"
-            f"{value}{previous} {outcome.fire_key}"
+            f"{value}{previous}{delivery} {outcome.fire_key}"
         )
     if not outcomes:
         print("0 alert definitions were due")
     return 1 if any(outcome.outcome in _ATTENTION for outcome in outcomes) else 0
 
 
-def main(argv: list[str] | None = None) -> int:
+def _refuse_unconfigured(settings: Settings, audit: AuditLog) -> int:
+    """Refuse to tick when there is no way to deliver a fire, and say why.
+
+    A worker that evaluates fires and drops the notification is worse than a
+    worker that does not start: the first looks healthy from cron, and the
+    breach it found is lost. So this is a refusal, audited like any other, with
+    a non-zero exit code that systemd and cron both surface.
+    """
+    missing = missing_smtp(settings)
+    reason = (
+        f"smtp_unconfigured: the alert worker cannot deliver notifications, "
+        f"because {missing} is not set"
+    )
+    print(f"refused: {reason}", file=sys.stderr)
+    try:
+        audit.record_event(
+            username=WORKER_USERNAME,
+            role=WORKER_ROLE,
+            status="denied",
+            event_type=EVENT_DELIVERY_UNCONFIGURED,
+            capability=ALERT,
+            question="refused to run the alert worker: no notification sender is configured",
+            tables=(),
+            sql=None,
+            row_count=None,
+            error=reason,
+        )
+    except Exception:
+        # The refusal still stands, and it still exits non-zero.
+        pass
+    return EXIT_UNCONFIGURED
+
+
+def main(argv: list[str] | None = None, *, sender: MailSender | None = None) -> int:
     """Run one tick, or keep running ticks with ``--loop``.
 
     One tick is the cron and systemd form:
@@ -587,6 +855,11 @@ def main(argv: list[str] | None = None) -> int:
 
     A tick is cheap when nothing is due, and a repeated tick is harmless: the
     fire key makes a second evaluation of the same window impossible.
+
+    The sender comes from ``SMTP_HOST`` (and the other ``SMTP_*`` settings). When
+    those are unset the command refuses to run rather than tick and deliver
+    nothing. ``sender`` overrides it, which is how a test drives the whole
+    command without a mail server.
     """
     parser = argparse.ArgumentParser(
         prog="python -m src.worker",
@@ -609,10 +882,16 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--interval must be at least 1 second")
 
     settings = load_settings()
+    audit = AuditLog(settings.audit_path)
+    transport = sender if sender is not None else build_sender(settings)
+    if transport is None:
+        return _refuse_unconfigured(settings, audit)
+
     worker = Worker.from_settings(
         settings,
-        audit=AuditLog(settings.audit_path),
+        audit=audit,
         catalog=load_catalog(settings.routing_path),
+        sender=transport,
     )
 
     if not args.loop:

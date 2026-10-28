@@ -13,6 +13,9 @@ class User:
     # Capability grants. The default is the pre-capability behaviour: a role
     # that may ask a question. See src/capabilities.py.
     capabilities: tuple[str, ...] = ("query",)
+    # Where a notification is sent. Optional: a small instance whose relay
+    # resolves usernames leaves it out, and the username is the address.
+    email: str | None = None
 
 
 @dataclass(frozen=True)

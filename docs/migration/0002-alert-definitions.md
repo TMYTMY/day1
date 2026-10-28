@@ -63,6 +63,45 @@ with `event_type = alert_refused` and `capability = alert`:
 A window beyond the maximum is **refused, never clamped**: shortening it
 silently would answer a question the definer did not ask.
 
+## Operating a definition without the web app
+
+`python -m src.alert_cli` is the operator surface for one instance. It reads the
+same `ALERTS_PATH`, `METRICS_PATH`, `USERS_PATH`, `ROUTING_PATH`, `AUDIT_PATH`
+and `MAX_ALERT_WINDOW_DAYS` the app reads, so one environment block is one
+instance, and nothing here needs Streamlit running (or installed).
+
+| Command | What it does |
+| --- | --- |
+| `python -m src.alert_cli draft --as analyst --metric revenue_by_product --comparison below_absolute --constant 5000 --window 7 --recipient analyst` | records a draft; prints `id: N` |
+| `python -m src.alert_cli confirm 1 --as analyst` | activates draft `#1` as its owner |
+| `python -m src.alert_cli list` | one row per definition: id, state, metric, condition, window, recipients, owner, confirmation date |
+| `python -m src.alert_cli show 1` | definition `#1` in full, including `supersedes` / `superseded by` |
+| `python -m src.alert_cli deactivate 1 --as analyst` | stops evaluating a live definition (the API calls this `pause`) |
+| `python -m src.alert_cli resume 1 --as analyst` | makes a deactivated definition live again |
+
+`draft` also takes `--cadence daily`, `--local-time HH:MM` (default `09:00`) and
+`--supersedes <id>`; `--recipient` may be repeated.
+
+**A write is made as a named actor.** `--as` names them and the password comes
+from `DAY1_CLI_PASSWORD`, or from a prompt when the command is run in a
+terminal. There is no `--password` flag on purpose: a flag would put the secret
+in the shell history and in `ps`. `list` and `show` take no actor — they read
+the instance's own database file, exactly as `sqlite3` on `data/alerts.db`
+would, so the boundary there is filesystem access.
+
+**Exit codes are the contract for a script:**
+
+| Code | Meaning |
+| --- | --- |
+| `0` | the command did what it was asked |
+| `1` | refused: the reason is printed with the offending `field` and the stable `reason` code (see the table above) |
+| `2` | the command line itself was wrong — a missing or unknown argument, or an id that is not a number |
+
+A refusal from this command is the same refusal the app shows, written by the
+same code: it names the offending field, writes one `alert_refused` audit row,
+and leaves no definition behind. A usage error (exit `2`) is rejected before the
+settings are read, so a typo creates no alert database and no audit row.
+
 ## Superseding
 
 `draft(..., supersedes=<id>)` records a new draft that must be confirmed again.

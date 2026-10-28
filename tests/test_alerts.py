@@ -19,6 +19,7 @@ import src.alerts as alerts_module
 from src.alerts import (
     CONFIRMED,
     DRAFT,
+    PAUSED,
     SUPERSEDED,
     AlertService,
 )
@@ -688,3 +689,52 @@ def test_the_definition_path_calls_no_language_model(instance, monkeypatch):
     drafted = _draft(instance.service, instance.alex)
     assert drafted.ok is True
     assert instance.service.confirm(drafted.definition.id, instance.alex).ok is True
+
+
+# --- pausing a live definition -------------------------------------------
+
+
+def test_a_paused_definition_is_no_longer_live(instance):
+    drafted = _draft(instance.service, instance.alex)
+    instance.service.confirm(drafted.definition.id, instance.alex)
+    assert len(instance.service.live()) == 1
+
+    result = instance.service.pause(drafted.definition.id, instance.alex)
+    assert result.ok is True
+    assert instance.service.definition(drafted.definition.id).state == PAUSED
+    assert instance.service.live() == []
+
+    row = _rows(instance.audit.path)[-1]
+    assert row["event_type"] == "alert_paused"
+    assert row["capability"] == "alert"
+
+
+def test_only_the_owner_may_pause_a_definition(instance):
+    drafted = _draft(instance.service, instance.alex)
+    instance.service.confirm(drafted.definition.id, instance.alex)
+
+    result = instance.service.pause(drafted.definition.id, instance.rita)
+    assert result.ok is False
+    assert result.field == "owner"
+    assert result.reason == "not_owner"
+    assert instance.service.definition(drafted.definition.id).state == CONFIRMED
+    assert len(instance.service.live()) == 1
+
+
+def test_resuming_brings_the_definition_back(instance):
+    drafted = _draft(instance.service, instance.alex)
+    instance.service.confirm(drafted.definition.id, instance.alex)
+    instance.service.pause(drafted.definition.id, instance.alex)
+
+    result = instance.service.resume(drafted.definition.id, instance.alex)
+    assert result.ok is True
+    assert instance.service.definition(drafted.definition.id).state == CONFIRMED
+    assert len(instance.service.live()) == 1
+
+
+def test_a_draft_cannot_be_paused(instance):
+    drafted = _draft(instance.service, instance.alex)
+    result = instance.service.pause(drafted.definition.id, instance.alex)
+    assert result.ok is False
+    assert result.field == "state"
+    assert result.reason == "state_not_confirmed"

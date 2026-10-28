@@ -51,6 +51,7 @@ from src.routing import Catalog
 # Lifecycle states. Only ``CONFIRMED`` may fire.
 DRAFT = "draft"
 CONFIRMED = "confirmed"
+PAUSED = "paused"
 SUPERSEDED = "superseded"
 STATES = frozenset({DRAFT, CONFIRMED, SUPERSEDED})
 
@@ -71,6 +72,8 @@ DEFAULT_LOCAL_TIME = "09:00"
 # Audit event types. The capability is always ``alert``.
 EVENT_DRAFTED = "alert_drafted"
 EVENT_CONFIRMED = "alert_confirmed"
+EVENT_PAUSED = "alert_paused"
+EVENT_RESUMED = "alert_resumed"
 EVENT_REFUSED = "alert_refused"
 
 # Refusal reasons, also written to the audit row's error column. Keep them
@@ -95,6 +98,8 @@ OWNER_MISMATCH = "owner_mismatch"
 NOT_OWNER = "not_owner"
 ALERT_UNKNOWN = "alert_unknown"
 STATE_NOT_DRAFT = "state_not_draft"
+STATE_NOT_CONFIRMED = "state_not_confirmed"
+STATE_NOT_PAUSED = "state_not_paused"
 
 _LOCAL_TIME = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
 
@@ -305,6 +310,21 @@ class AlertStore:
             conn.execute(
                 "UPDATE alert_definitions SET state = ?, superseded_by = ? WHERE id = ?",
                 (SUPERSEDED, int(by_id), int(alert_id)),
+            )
+
+    def pause(self, alert_id: int) -> None:
+        """Stop evaluating a live definition without deleting its history."""
+        with self._session() as conn:
+            conn.execute(
+                "UPDATE alert_definitions SET state = ? WHERE id = ?",
+                (PAUSED, int(alert_id)),
+            )
+
+    def resume(self, alert_id: int) -> None:
+        with self._session() as conn:
+            conn.execute(
+                "UPDATE alert_definitions SET state = ? WHERE id = ?",
+                (CONFIRMED, int(alert_id)),
             )
 
 
@@ -635,6 +655,115 @@ class AlertService:
         if not audited:
             message = f"{message} The usage log could not be written."
         return AlertResult(ok=True, message=message, definition=updated, audited=audited)
+
+    def pause(self, alert_id: int, actor: User) -> AlertResult:
+        """Stop evaluating a live definition. Its history stays in the store."""
+        record = self.store.get(alert_id)
+        if record is None:
+            return self._refuse(
+                user=actor,
+                action="pause",
+                field="alert",
+                reason=ALERT_UNKNOWN,
+                message=f"Alert definition #{alert_id} does not exist.",
+                metric=None,
+            )
+        if record.owner != actor.username:
+            return self._refuse(
+                user=actor,
+                action="pause",
+                field="owner",
+                reason=NOT_OWNER,
+                message=(
+                    "Only the owner of an alert definition can pause it. "
+                    f"The owner is {record.owner}."
+                ),
+                metric=self._metric(record.metric_id),
+                alert_id=alert_id,
+            )
+        if record.state != CONFIRMED:
+            return self._refuse(
+                user=actor,
+                action="pause",
+                field="state",
+                reason=STATE_NOT_CONFIRMED,
+                message=(
+                    f"Alert definition #{alert_id} is {record.state}, so there is nothing to pause."
+                ),
+                metric=self._metric(record.metric_id),
+                alert_id=alert_id,
+            )
+
+        self.store.pause(alert_id)
+        audited = self._audit(
+            user=actor,
+            status="ok",
+            event_type=EVENT_PAUSED,
+            action=f"pause alert definition #{alert_id}",
+            metric=self._metric(record.metric_id),
+            error=None,
+            extra="state=paused",
+        )
+        message = (
+            f"Alert definition #{alert_id} is paused. It stays in the audit trail and is "
+            "no longer evaluated."
+        )
+        if not audited:
+            message = f"{message} The usage log could not be written."
+        return AlertResult(ok=True, message=message, definition=self.store.get(alert_id), audited=audited)
+
+    def resume(self, alert_id: int, actor: User) -> AlertResult:
+        """Make a paused definition live again. Only its owner may do it."""
+        record = self.store.get(alert_id)
+        if record is None:
+            return self._refuse(
+                user=actor,
+                action="resume",
+                field="alert",
+                reason=ALERT_UNKNOWN,
+                message=f"Alert definition #{alert_id} does not exist.",
+                metric=None,
+            )
+        if record.owner != actor.username:
+            return self._refuse(
+                user=actor,
+                action="resume",
+                field="owner",
+                reason=NOT_OWNER,
+                message=(
+                    "Only the owner of an alert definition can resume it. "
+                    f"The owner is {record.owner}."
+                ),
+                metric=self._metric(record.metric_id),
+                alert_id=alert_id,
+            )
+        if record.state != PAUSED:
+            return self._refuse(
+                user=actor,
+                action="resume",
+                field="state",
+                reason=STATE_NOT_PAUSED,
+                message=(
+                    f"Alert definition #{alert_id} is {record.state}, so it is not paused."
+                ),
+                metric=self._metric(record.metric_id),
+                alert_id=alert_id,
+            )
+
+        self.store.resume(alert_id)
+        audited = self._audit(
+            user=actor,
+            status="ok",
+            event_type=EVENT_RESUMED,
+            action=f"resume alert definition #{alert_id}",
+            metric=self._metric(record.metric_id),
+            error=None,
+            extra="state=confirmed",
+        )
+        message = f"Alert definition #{alert_id} is live again."
+        if not audited:
+            message = f"{message} The usage log could not be written."
+        return AlertResult(ok=True, message=message, definition=self.store.get(alert_id), audited=audited)
 
     # -- validation helpers ----------------------------------------------
 

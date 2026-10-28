@@ -1,0 +1,577 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PROTOTYPE — Alert 生命週期</title>
+<style>
+  :root{
+    --ink:#16202b; --muted:#5d6b7a; --line:#dfe5ec; --bg:#f6f8fa; --card:#fff;
+    --accent:#1d5fd6; --ok:#1a7f4b; --warn:#b26a00; --bad:#b3261e; --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans TC","Microsoft JhengHei",sans-serif}
+  .wrap{max-width:1000px;margin:0 auto;padding:28px 20px 80px}
+  h1{font-size:22px;margin:0 0 6px}
+  .proto-tag{display:inline-block;background:#fff3cd;color:#7a5a00;border:1px solid #ffe08a;
+             border-radius:999px;padding:2px 10px;font-size:12px;font-weight:600;margin-bottom:12px}
+  .question{background:var(--card);border:1px solid var(--line);border-left:3px solid var(--accent);
+            border-radius:8px;padding:14px 16px;color:#2b3a4a;margin-bottom:22px}
+  .question b{color:var(--ink)}
+  h2{font-size:15px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);
+     margin:26px 0 10px;font-weight:700}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(215px,1fr));gap:12px 20px}
+  .field{min-width:0}
+  .field .k{font-size:12px;color:var(--muted);letter-spacing:.03em}
+  .field .v{font-weight:600;word-break:break-word}
+  .mono{font-family:var(--mono);font-size:13px}
+  .pill{display:inline-block;border-radius:999px;padding:1px 9px;font-size:12px;font-weight:700}
+  .pill.draft{background:#e8eefc;color:#1d4ed8}
+  .pill.active{background:#e3f5ea;color:var(--ok)}
+  .pill.paused{background:#fff1dc;color:var(--warn)}
+  .pill.superseded{background:#eceff3;color:#5b6673}
+  .pill.ok{background:#e3f5ea;color:var(--ok)}
+  .pill.no{background:#eceff3;color:#5b6673}
+  .pill.fire{background:#fdeaea;color:var(--bad)}
+  .btn{appearance:none;border:1px solid var(--line);background:#fff;color:var(--ink);
+       border-radius:8px;padding:8px 12px;font-size:14px;font-weight:600;cursor:pointer}
+  .btn:hover{border-color:#b9c4d1}
+  .btn:disabled{opacity:.45;cursor:not-allowed}
+  .btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+  .btn.danger{color:var(--bad);border-color:#f0c9c6}
+  .buttons{display:flex;flex-wrap:wrap;gap:8px}
+  .tabs{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px}
+  .tab{border:1px solid var(--line);background:#fff;border-radius:8px;padding:7px 12px;
+       font-size:13px;font-weight:600;cursor:pointer;color:var(--muted)}
+  .tab[aria-selected="true"]{background:var(--accent);border-color:var(--accent);color:#fff}
+  .scenario-desc{color:#37485a;margin:0 0 12px}
+  .steps{display:flex;flex-direction:column;gap:8px}
+  .step{display:flex;align-items:center;gap:10px;border:1px solid var(--line);border-radius:8px;
+        padding:10px 12px;background:#fbfcfe}
+  .step .n{width:22px;height:22px;flex:0 0 22px;border-radius:50%;background:#e8eefc;color:#1d4ed8;
+           font-size:12px;font-weight:700;display:grid;place-items:center}
+  .step.done{opacity:.5}
+  .step .why{color:var(--muted);font-size:13px}
+  ul.audit{list-style:none;margin:0;padding:0;font-family:var(--mono);font-size:12.5px}
+  ul.audit li{padding:5px 0;border-bottom:1px dashed var(--line);display:flex;gap:10px}
+  ul.audit li:last-child{border-bottom:0}
+  .audit .t{color:var(--muted);flex:0 0 78px}
+  .outbox{margin:0;padding-left:18px}
+  .outbox li{margin-bottom:10px}
+  .outbox .sub{color:var(--muted);font-size:13px}
+  .flag{background:#fff8e6;border:1px solid #ffe08a;border-radius:8px;padding:10px 12px;
+        color:#6b5200;font-size:13.5px;margin-top:12px}
+  .chg{color:var(--accent);font-weight:700}
+  .err{background:#fdeaea;border:1px solid #f2c4c0;color:#7f1d1a;border-radius:8px;
+       padding:8px 12px;font-size:13.5px;margin-bottom:12px}
+  details{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:10px 14px;margin-top:14px}
+  summary{cursor:pointer;font-weight:700;color:var(--muted);font-size:13px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="proto-tag">PROTOTYPE · 用完即棄 · 唔係產品</div>
+  <h1>Alert 生命週期</h1>
+
+  <div class="question">
+    <b>要答嘅問題：</b>一條 alert 由「草稿 → 確認 → 每日執行 → 被新版取代」，
+    加上「同一日唔可以發兩封」同「每次發信前逐個收件人驗權限」，
+    呢個模型喺真實序列下企唔企得住？<br>
+    <span style="color:#5d6b7a;font-size:13.5px">
+      特別想睇：暫停中嘅定義、同一日重跑、改 window、收件人中途失去權限、未確認就執行。
+      呢個 demo 只模擬邏輯，冇接真數據庫、冇真 email。
+    </span>
+  </div>
+
+  <div id="error"></div>
+
+  <h2>而家嘅狀態</h2>
+  <div class="card" id="statePanel"></div>
+
+  <h2>自由操作</h2>
+  <div class="card">
+    <div class="buttons" id="freeplay"></div>
+    <div class="flag">亂按冇問題：呢個係用嚟撞出「咦，點會咁？」嘅地方。撞得越怪越好。</div>
+  </div>
+
+  <h2>引導情境</h2>
+  <div class="card">
+    <div class="tabs" id="tabs"></div>
+    <p class="scenario-desc" id="scenarioDesc"></p>
+    <div class="steps" id="steps"></div>
+  </div>
+
+  <h2>發出嘅通知（模擬）</h2>
+  <div class="card"><ul class="outbox" id="outbox"></ul></div>
+
+  <details>
+    <summary>呢個 demo 代表邊個規格（click 開）</summary>
+    <p style="font-size:13.5px;color:#37485a">
+      對應 GitHub issue #16 嘅 Implementation Decisions：定義期用模型、執行期零模型；
+      draft 要 owner 親手確認才生效；fire key = 定義身分 + window 結束日，唯一約束擋重跑；
+      <b>每次觸發都發信</b>（連續低於門檻會連續通知）；收件人每次發信前重新檢查權限；
+      window 上限 365 日，超過要拒絕而唔可以靜靜截短。
+    </p>
+  </details>
+</div>
+
+<!-- ============================================================
+     推理核心：純邏輯，冇 DOM。可以整段搬去真實 codebase。
+     狀態機：draft → active ⇄ paused，active/paused → superseded
+     ============================================================ -->
+<script id="alert-model">
+const AlertModel = (() => {
+  const MAX_WINDOW_DAYS = 365;
+
+  const COMPARISONS = {
+    below_absolute:  { label: '低於固定值',        needsPrevious: false },
+    above_absolute:  { label: '高於固定值',        needsPrevious: false },
+    change_pct_down: { label: '比上一期跌超過 %',  needsPrevious: true  },
+    change_pct_up:   { label: '比上一期升超過 %',  needsPrevious: true  },
+  };
+
+  const STATUS = { DRAFT:'draft', ACTIVE:'active', PAUSED:'paused', SUPERSEDED:'superseded' };
+
+  function blank() {
+    return {
+      definition: null,        // 生效版本（或草稿）
+      superseded: [],          // 舊版本歷史
+      firedKeys: [],           // 已執行過嘅 (定義身分 + window 結束日)
+      audit: [],
+      outbox: [],
+    };
+  }
+
+  let seq = 0;
+  const nextId = () => `alert_${++seq}`;
+
+  // ---- 純函數：條件評估 ----
+  function evaluate(value, previous, comparison, constant) {
+    const kind = COMPARISONS[comparison];
+    if (kind.needsPrevious) {
+      if (previous === null || previous === undefined || previous === 0) return 'insufficient_data';
+      const pct = ((value - previous) / previous) * 100;
+      if (comparison === 'change_pct_down') return pct <= -Math.abs(constant) ? 'fire' : 'no_fire';
+      return pct >= Math.abs(constant) ? 'fire' : 'no_fire';
+    }
+    if (comparison === 'below_absolute') return value < constant ? 'fire' : 'no_fire';
+    return value > constant ? 'fire' : 'no_fire';
+  }
+
+  // ---- 驗證：確認前、執行前都要過 ----
+  function validate(d) {
+    const errs = [];
+    if (!d.metric) errs.push('未揀 metric');
+    if (!Number.isFinite(d.windowDays) || d.windowDays < 1) errs.push('window 最少 1 日');
+    if (d.windowDays > MAX_WINDOW_DAYS) errs.push(`window 超過上限 ${MAX_WINDOW_DAYS} 日（要拒絕，唔可以靜靜截短）`);
+    if (!d.recipients || d.recipients.length === 0) errs.push('冇收件人');
+    return errs;
+  }
+
+  // ---- 動作 ----
+  function createDraft(state, fields, actor) {
+    const d = {
+      id: nextId(),
+      metric: fields.metric,
+      metricConfirmed: fields.metricConfirmed !== false,
+      comparison: fields.comparison,
+      constant: fields.constant,
+      windowDays: fields.windowDays,
+      atTime: fields.atTime || '09:00',
+      recipients: fields.recipients.map(u => ({ username:u, canRead:true })),
+      owner: actor,
+      status: STATUS.DRAFT,
+      confirmedAt: null,
+      confirmedBy: null,
+      createdAt: state.audit.length,
+    };
+    const errs = validate(d);
+    state.definition = d;
+    log(state, 'definition.created', `${actor} 建立草稿（未生效）`, { definitionId:d.id });
+    return { state, errors: errs };
+  }
+
+  function confirm(state, actor) {
+    const d = state.definition;
+    if (!d) return wrong(state, '冇任何定義可以確認');
+    if (d.status !== STATUS.DRAFT) return wrong(state, '只有草稿可以確認');
+    if (d.owner !== actor) return wrong(state, `只有擁有者（${d.owner}）可以確認，${actor} 唔可以`);
+    const errs = validate(d);
+    if (!d.metricConfirmed) errs.push('metric 定義仍係未簽核（placeholder），唔可以排程');
+    if (errs.length) return wrong(state, '確認失敗：' + errs.join('；'));
+    d.status = STATUS.ACTIVE;
+    d.confirmedAt = '2026-10-27';
+    d.confirmedBy = actor;
+    log(state, 'definition.confirmed', `${actor} 確認，定義生效`, { definitionId:d.id });
+    return { state };
+  }
+
+  function pause(state, actor) {
+    const d = state.definition;
+    if (!d) return wrong(state, '冇任何定義');
+    if (d.status !== STATUS.ACTIVE) return wrong(state, '只有生效中嘅定義可以暫停');
+    d.status = STATUS.PAUSED;
+    log(state, 'definition.paused', `${actor} 暫停`, { definitionId:d.id });
+    return { state };
+  }
+
+  function resume(state, actor) {
+    const d = state.definition;
+    if (!d) return wrong(state, '冇任何定義');
+    if (d.status !== STATUS.PAUSED) return wrong(state, '只有暫停中嘅定義可以恢復');
+    d.status = STATUS.ACTIVE;
+    log(state, 'definition.resumed', `${actor} 恢復`, { definitionId:d.id });
+    return { state };
+  }
+
+  // 新版本永遠由 draft 開始，要重新確認
+  function supersede(state, patch, actor) {
+    const old = state.definition;
+    if (!old) return wrong(state, '冇任何定義');
+    if (old.status === STATUS.DRAFT) return wrong(state, '草稿直接改就得，唔需要取代');
+    const fresh = { ...old, ...patch, status: STATUS.DRAFT, confirmedAt:null, confirmedBy:null, id: nextId() };
+    fresh.recipients = (patch.recipients || old.recipients).map(u =>
+      typeof u === 'string' ? { username:u, canRead:true } : { ...u });
+    old.status = STATUS.SUPERSEDED;
+    state.superseded.unshift(old);
+    state.definition = fresh;
+    log(state, 'definition.superseded', `${actor} 用新版取代舊版（新版要重新確認）`,
+        { oldId: old.id, newId: fresh.id });
+    return { state, errors: validate(fresh) };
+  }
+
+  // 執行一次（受 windowEnd 定身分）；prefs: { value, previous, windowEnd, revoke:[] }
+  function fire(state, opts) {
+    const d = state.definition;
+    if (!d) return wrong(state, '冇任何定義');
+    if (d.status === STATUS.DRAFT) return wrong(state, '草稿未確認，唔會執行（要 owner 先確認）');
+    if (d.status === STATUS.SUPERSEDED) return wrong(state, '被取代嘅版本唔會再執行');
+    if (d.status === STATUS.PAUSED) {
+      log(state, 'fire.skipped', '暫停中，唔執行，只記一筆稽核', { definitionId:d.id });
+      return { state, skipped:true };
+    }
+
+    const fireKey = `${d.id}@${opts.windowEnd}`;
+    if (state.firedKeys.includes(fireKey)) {
+      log(state, 'fire.duplicate', `同一個 window（${opts.windowEnd}）已經執行過，唔會再發`, { fireKey });
+      return { state, duplicate:true, fireKey };
+    }
+
+    const verdict = evaluate(opts.value, opts.previous, d.comparison, d.constant);
+    state.firedKeys.push(fireKey);
+
+    const base = { fireKey, value:opts.value, windowEnd:opts.windowEnd, verdict };
+    log(state, 'fire.evaluated', `執行：值 ${opts.value}，判定 ${verdict}`, base);
+
+    if (verdict === 'insufficient_data') {
+      log(state, 'fire.insufficient', '缺上一期數據，唔會當 0、唔會發信', base);
+      return { state, verdict, fireKey };
+    }
+    if (verdict === 'no_fire') {
+      return { state, verdict, fireKey };
+    }
+
+    // 逐個收件人驗權限，只發給仍然有權嘅人
+    const revoked = new Set(opts.revoke || []);
+    const allowed = [];
+    const blocked = [];
+    for (const r of d.recipients) {
+      const canRead = r.canRead && !revoked.has(r.username);
+      if (canRead) allowed.push(r.username);
+      else blocked.push(r.username);
+    }
+    if (blocked.length) {
+      log(state, 'notification.recipient_blocked',
+          `以下收件人已無權限，唔會收到：${blocked.join(', ')}`, { fireKey, blocked });
+    }
+
+    let notification = null;
+    if (allowed.length) {
+      notification = {
+        to: allowed,
+        subject: `${d.metric} ${COMPARISONS[d.comparison].label} ${d.constant}`,
+        body: `window：最近 ${d.windowDays} 日（截至 ${opts.windowEnd}）\n值：${opts.value}\n門檻：${COMPARISONS[d.comparison].label} ${d.constant}`,
+        fireKey,
+      };
+      state.outbox.unshift(notification);
+      log(state, 'notification.sent', `發信給 ${allowed.join(', ')}`, { fireKey });
+    } else {
+      log(state, 'notification.suppressed', '全部收件人都無權限，冇人收到（唔會靜靜當成功）', { fireKey });
+    }
+
+    return { state, verdict, fireKey, notification, blocked };
+  }
+
+  function wrong(state, message) {
+    log(state, 'action.rejected', message, {});
+    return { state, error: message };
+  }
+
+  function log(state, type, text, data) {
+    state.audit.unshift({
+      at: '2026-10-27',
+      type,
+      text,
+      data: data || {},
+    });
+  }
+
+  return {
+    blank, evaluate, validate, createDraft, confirm, pause, resume, supersede, fire,
+    COMPARISONS, STATUS, MAX_WINDOW_DAYS,
+  };
+})();
+</script>
+
+<!-- ============================================================
+     頁面外殼：只負責畫同接按鈕，唔放任何邏輯
+     ============================================================ -->
+<script>
+(function(){
+  const { COMPARISONS, STATUS } = AlertModel;
+  const TODAY = '2026-10-27';
+  const REVENUE = { metric:'Revenue by product', metricConfirmed:true };
+  const DAU = { metric:'DAU by platform', metricConfirmed:false };
+
+  let state = AlertModel.blank();
+  let lastError = null;
+  let scenario = null;      // {id, stepIndex}
+
+  const el = id => document.getElementById(id);
+
+  function seedRevenue(){
+    state = AlertModel.blank();
+    AlertModel.createDraft(state, {
+      ...REVENUE, comparison:'below_absolute', constant:5000, windowDays:1,
+      atTime:'09:00', recipients:['tommy','finance_lead'],
+    }, 'tommy');
+    AlertModel.confirm(state, 'tommy');
+  }
+
+  // ---------- 情境定義 ----------
+  const SCENARIOS = [
+    {
+      id:'daily', title:'A · 連續幾日低於門檻',
+      desc:'你的例子：revenue 低過 5,000 就通知。要觀察嘅係「第二日仍然低」會唔會再通知。',
+      steps:[
+        { label:'執行（10-27，值 4,900）', run:() => doFire({windowEnd:'2026-10-27', value:4900}) },
+        { label:'執行（10-28，值 4,850）', run:() => doFire({windowEnd:'2026-10-28', value:4850}) },
+        { label:'執行（10-29，值 5,010）', run:() => doFire({windowEnd:'2026-10-29', value:5010}) },
+        { label:'執行（10-30，值 4,950）', run:() => doFire({windowEnd:'2026-10-30', value:4950}) },
+        { label:'執行（10-31，值 4,700）', run:() => doFire({windowEnd:'2026-10-31', value:4700}) },
+      ],
+    },
+    {
+      id:'rerun', title:'B · 同一日重跑',
+      desc:'worker 重啟或者兩個 tick 撞埋一齊。同一日應該只可以發一封。',
+      steps:[
+        { label:'執行（10-27，值 4,900）', run:() => doFire({windowEnd:'2026-10-27', value:4900}) },
+        { label:'再執行同一日（值 4,900）', run:() => doFire({windowEnd:'2026-10-27', value:4900}) },
+        { label:'再執行同一日（值 4,990，仍然低過門檻）', run:() => doFire({windowEnd:'2026-10-27', value:4990}) },
+      ],
+    },
+    {
+      id:'pause', title:'C · 暫停中',
+      desc:'暫停之後 worker 仍然會 tick。應該唔會發信，但亦唔應該靜靜當冇事。',
+      steps:[
+        { label:'暫停', run:() => { AlertModel.pause(state,'tommy'); } },
+        { label:'執行（10-27，值 4,900）', run:() => doFire({windowEnd:'2026-10-27', value:4900}) },
+        { label:'恢復', run:() => { AlertModel.resume(state,'tommy'); } },
+        { label:'執行（10-27，值 4,900）', run:() => doFire({windowEnd:'2026-10-27', value:4900}) },
+      ],
+    },
+    {
+      id:'window', title:'D · 改 window',
+      desc:'由「昨日單日」改成「最近 7 日」。新版應該要重新確認，舊版留低做歷史。',
+      steps:[
+        { label:'改成 window = 7 日', run:() => { AlertModel.supersede(state, { windowDays:7 }, 'tommy'); } },
+        { label:'執行（未確認，10-27）', run:() => doFire({windowEnd:'2026-10-27', value:4900}) },
+        { label:'確認新版', run:() => { AlertModel.confirm(state,'tommy'); } },
+        { label:'執行（10-27，值 4,900）', run:() => doFire({windowEnd:'2026-10-27', value:4900}) },
+      ],
+    },
+    {
+      id:'revoke', title:'E · 收件人中途失去權限',
+      desc:'finance_lead 已經冇 revenue 權限。發信時應該只發給仍然有權嘅人，而且要留記錄。',
+      steps:[
+        { label:'執行（10-27，值 4,900）', run:() => doFire({windowEnd:'2026-10-27', value:4900}) },
+        { label:'回收 finance_lead 權限後執行（10-28，值 4,800）', run:() => doFire({windowEnd:'2026-10-28', value:4800, revoke:['finance_lead']}) },
+        { label:'連 tommy 都回收後執行（10-29，值 4,700）', run:() => doFire({windowEnd:'2026-10-29', value:4700, revoke:['tommy','finance_lead']}) },
+      ],
+    },
+    {
+      id:'illegal', title:'F · 應該做唔到嘅事',
+      desc:'未確認就執行、唔係 owner 去確認、window 超上限、DAU 口徑未簽核 —— 全部應該被拒絕。',
+      steps:[
+        { label:'建立一個未確認嘅新草稿（window 400 日）', run:() => { const out = AlertModel.createDraft(state, {...REVENUE, comparison:'below_absolute', constant:5000, windowDays:400, recipients:['tommy']}, 'tommy'); if (out.errors && out.errors.length) return { error: '草稿有問題：' + out.errors.join('；') }; return out; } },
+        { label:'試著確認（window 超上限）', run:() => AlertModel.confirm(state,'tommy') },
+        { label:'改回 window = 30 日再確認', run:() => { state.definition.windowDays = 30; return AlertModel.confirm(state,'tommy'); } },
+        { label:'叫另一個人（analyst_kwok）去確認新版', run:() => { AlertModel.supersede(state,{windowDays:14},'tommy'); return AlertModel.confirm(state,'analyst_kwok'); } },
+        { label:'建立 DAU alert（口徑未簽核）', run:() => { AlertModel.createDraft(state, {...DAU, comparison:'below_absolute', constant:1000, windowDays:7, recipients:['tommy']}, 'tommy'); return AlertModel.confirm(state,'tommy'); } },
+      ],
+    },
+  ];
+
+  // ---------- 動作封裝 ----------
+  function doFire(opts){
+    return AlertModel.fire(state, opts);
+  }
+
+  function run(fn){
+    lastError = null;
+    const out = fn();
+    if (out && out.error) lastError = out.error;
+    render();
+  }
+
+  // ---------- 畫面 ----------
+  function pill(status){
+    return `<span class="pill ${status}">${
+      {draft:'草稿（未生效）',active:'生效中',paused:'暫停',superseded:'已被取代'}[status] || status
+    }</span>`;
+  }
+
+  function renderState(){
+    const d = state.definition;
+    if (!d){
+      el('statePanel').innerHTML = '<div style="color:#5d6b7a">而家冇任何 alert 定義。撳下面「建立草稿」開始。</div>';
+      return;
+    }
+    const c = COMPARISONS[d.comparison];
+    const recipients = d.recipients.map(r =>
+      `<span class="pill ${r.canRead?'ok':'no'}">${r.username}${r.canRead?'':' · 無權限'}</span>`).join(' ');
+    el('statePanel').innerHTML = `
+      <div class="grid">
+        <div class="field"><div class="k">定義身分</div><div class="v mono">${d.id}</div></div>
+        <div class="field"><div class="k">狀態</div><div class="v">${pill(d.status)}</div></div>
+        <div class="field"><div class="k">Metric</div><div class="v">${d.metric}${
+          d.metricConfirmed?'':' <span class="pill no">口徑未簽核</span>'}</div></div>
+        <div class="field"><div class="k">條件</div><div class="v">${c.label} ${d.constant}</div></div>
+        <div class="field"><div class="k">Window</div><div class="v">${d.windowDays} 日</div></div>
+        <div class="field"><div class="k">每日執行時間</div><div class="v mono">${d.atTime}</div></div>
+        <div class="field"><div class="k">收件人</div><div class="v">${recipients}</div></div>
+        <div class="field"><div class="k">擁有者 / 確認</div><div class="v">${d.owner} · ${
+          d.confirmedBy ? d.confirmedBy+' @ '+d.confirmedAt : '未確認'}</div></div>
+        <div class="field"><div class="k">已執行嘅 window</div><div class="v mono" style="font-size:12.5px">${
+          state.firedKeys.length ? state.firedKeys.join('<br>') : '（未有）'}</div></div>
+        <div class="field"><div class="k">舊版本</div><div class="v">${
+          state.superseded.length ? state.superseded.map(v=>`${v.id}（${v.windowDays} 日）`).join('、') : '（冇）'}</div></div>
+      </div>
+      <div style="margin-top:16px">
+        <div class="k" style="font-size:12px;color:#5d6b7a;margin-bottom:6px">最近稽核（最新在上）</div>
+        <ul class="audit">${state.audit.slice(0,8).map(a=>
+          `<li><span class="t">${a.at}</span><span><b>${a.type}</b> — ${a.text}</span></li>`).join('')}</ul>
+      </div>`;
+  }
+
+  function renderFreeplay(){
+    const d = state.definition;
+    const has = !!d;
+    const btn = (label, fn, cls='', disabled=false) =>
+      `<button class="btn ${cls}" ${disabled?'disabled':''} data-act="${label}">${label}</button>`;
+    const acts = [
+      ['建立草稿（Revenue < 5,000，昨日）', () => { const out = AlertModel.createDraft(state,
+        {...REVENUE, comparison:'below_absolute', constant:5000, windowDays:1, recipients:['tommy','finance_lead']}, 'tommy');
+        if (out.errors && out.errors.length) return { error: '草稿有問題：' + out.errors.join('；') }; return out; }],
+      ['確認（tommy）', () => AlertModel.confirm(state,'tommy')],
+      ['確認（另一個人）', () => AlertModel.confirm(state,'analyst_kwok')],
+      ['暫停', () => AlertModel.pause(state,'tommy')],
+      ['恢復', () => AlertModel.resume(state,'tommy')],
+      ['改成 7 日 window', () => AlertModel.supersede(state,{windowDays:7},'tommy')],
+      ['改成 90 日 window', () => AlertModel.supersede(state,{windowDays:90},'tommy')],
+      ['執行：今日低於門檻（4,900）', () => doFire({windowEnd:TODAY, value:4900})],
+      ['執行：今日高於門檻（5,200）', () => doFire({windowEnd:TODAY, value:5200})],
+      ['改成「比上一期跌 10%」再執行（缺上一期）', () => {
+        AlertModel.supersede(state, { comparison:'change_pct_down', constant:10, windowDays:7 }, 'tommy');
+        AlertModel.confirm(state,'tommy');
+        return doFire({windowEnd:TODAY, value:4900, previous:null});
+      }],
+      ['重置', () => { seedRevenue(); }],
+    ];
+    el('freeplay').innerHTML = acts.map(([l]) => btn(l)).join('');
+    // wire
+    [...el('freeplay').querySelectorAll('button')].forEach((b,i)=>{
+      b.onclick = () => run(acts[i][1]);
+    });
+  }
+
+  function renderScenarios(){
+    el('tabs').innerHTML = SCENARIOS.map(s =>
+      `<button class="tab" role="tab" aria-selected="${scenario && scenario.id===s.id}" data-id="${s.id}">${s.title}</button>`
+    ).join('');
+    [...el('tabs').querySelectorAll('.tab')].forEach(t => {
+      t.onclick = () => { startScenario(t.dataset.id); };
+    });
+
+    if (!scenario){
+      el('scenarioDesc').textContent = '揀一個情境開始。每個情境都會重設到同一個起點，所以每次跑都一樣。';
+      el('steps').innerHTML = '';
+      return;
+    }
+    const s = SCENARIOS.find(x=>x.id===scenario.id);
+    el('scenarioDesc').textContent = s.desc;
+    el('steps').innerHTML = s.steps.map((st,i)=>{
+      const done = i < scenario.stepIndex;
+      const current = i === scenario.stepIndex;
+      return `<div class="step ${done?'done':''}">
+        <div class="n">${i+1}</div>
+        <button class="btn ${current?'primary':''}" ${done?'disabled':''} data-step="${i}">${st.label}</button>
+        ${current?'<span class="why">← 下一步</span>':''}
+      </div>`;
+    }).join('');
+    [...el('steps').querySelectorAll('button[data-step]')].forEach(b=>{
+      b.onclick = () => {
+        const i = Number(b.dataset.step);
+        if (i !== scenario.stepIndex) return;
+        lastError = null;
+        const out = s.steps[i].run();
+        if (out && out.error) lastError = out.error;
+        scenario.stepIndex++;
+        render();
+      };
+    });
+  }
+
+  function renderOutbox(){
+    if (!state.outbox.length){
+      el('outbox').innerHTML = '<li style="color:#5d6b7a;list-style:none">（未有通知）</li>';
+      return;
+    }
+    el('outbox').innerHTML = state.outbox.map(n => `
+      <li>
+        <div><b>${n.subject}</b></div>
+        <div class="sub">收件人：${n.to.join(', ')} · fire key <span class="mono">${n.fireKey}</span></div>
+        <div class="sub mono" style="white-space:pre-wrap;margin-top:4px">${n.body}</div>
+      </li>`).join('');
+  }
+
+  function renderError(){
+    el('error').innerHTML = lastError ? `<div class="err"><b>被拒絕：</b>${lastError}</div>` : '';
+  }
+
+  function render(){
+    renderError();
+    renderState();
+    renderFreeplay();
+    renderScenarios();
+    renderOutbox();
+  }
+
+  function startScenario(id){
+    seedRevenue();            // 每個情境由同一個已知狀態開始
+    lastError = null;
+    scenario = { id, stepIndex:0 };
+    render();
+  }
+
+  // 起始狀態
+  seedRevenue();
+  scenario = { id:'daily', stepIndex:0 };
+  render();
+})();
+</script>
+</body>
+</html>

@@ -24,7 +24,18 @@ from src.alert_eval import FIRE, evaluate
 from src.auth import authenticate
 from src.config import ROOT
 from src.db.sqlite import SqliteAdapter
+from src.delivery_health import (
+    ATTEMPT_DELIVERED,
+    ATTEMPT_FAILED,
+    ATTEMPT_SUPPRESSED,
+    HEALTH_FAILING,
+    HEALTH_HEALTHY,
+    HEALTH_NEVER_SENT,
+    delivery_health,
+)
 from src.fires import FireStore
+from src.instance import InstanceState
+from src.instance_identity import IdentityStore, running_hostname
 from src.metrics import load_metrics, measure_column
 from src.notify import Delivery, Notifier, RecordingSender
 from src.worker import (
@@ -1123,6 +1134,7 @@ def _command_env(instance, monkeypatch) -> None:
         "METRICS_PATH": instance.metrics_path,
         "USERS_PATH": instance.users_path,
         "ROUTING_PATH": instance.settings.routing_path,
+        "SETTINGS_PATH": instance.settings.settings_path,
     }.items():
         monkeypatch.setenv(name, str(value))
     for name in ("SMTP_HOST", "SMTP_USER", "SMTP_PASSWORD", "SMTP_FROM", "SMTP_PORT"):
@@ -1180,3 +1192,269 @@ def test_a_loop_interval_that_is_not_a_positive_number_is_refused(instance, monk
     monkeypatch.setenv("ALERTS_PATH", str(instance.settings.alerts_path))
     with pytest.raises(SystemExit):
         worker_module.main(["--loop", "--interval", "0"])
+
+
+# --- the instance's own record: health and identity (ticket #28) -----------
+#
+# The attempt log and the identity row live in the instance settings database,
+# so these tests build the worker the way ``from_settings`` does: with an
+# ``InstanceState`` whose host can be chosen. A wrong host is the copy this
+# feature exists to refuse, and nothing here reaches a mail server.
+
+
+def _instance_worker(
+    instance, sender, *, host: str, now: datetime | None = None, confirm: bool = False
+) -> Worker:
+    titles = _topic_titles(instance)
+    return Worker(
+        service=instance.service,
+        adapter=instance.adapter,
+        fires=FireStore(instance.settings.alerts_path),
+        titles=titles,
+        clock=lambda: now or _NOW,
+        notifier=Notifier(
+            sender=sender,
+            users_path=instance.users_path,
+            titles=titles,
+            sleep=lambda seconds: None,
+        ),
+        state=InstanceState(instance.settings.settings_path, hostname=host),
+        confirm_instance_move=confirm,
+    )
+
+
+def _pin_identity(instance, *, host: str, path=None):
+    """Configure the instance's identity the way first configuration would."""
+    return IdentityStore(instance.settings.settings_path).ensure(
+        hostname=host,
+        running_path=path if path is not None else instance.settings.settings_path,
+    )
+
+
+def _health(instance, *, now: datetime | None = None, window=None):
+    arguments = {"now": now or _NOW}
+    if window is not None:
+        arguments["window"] = window
+    return delivery_health(instance.settings.settings_path, **arguments)
+
+
+def test_a_delivered_fire_records_a_successful_attempt(instance):
+    definition = _live(instance)
+    sender = RecordingSender()
+
+    outcome = _instance_worker(instance, sender, host="host-a").tick()[0]
+
+    assert outcome.outcome == OUTCOME_FIRED
+    assert len(sender.messages) == 1
+    health = _health(instance)
+    assert health.state == HEALTH_HEALTHY
+    assert health.alive is True
+    assert health.streak == 0
+    assert health.last_success_at == _NOW
+    attempt = health.attempts[0]
+    assert attempt.outcome == ATTEMPT_DELIVERED
+    assert attempt.at == _NOW
+    assert attempt.alert_id == definition.id
+    assert attempt.fire_key == outcome.fire_key
+    assert attempt.recipients == 1
+
+
+def test_a_suppressed_fire_is_recorded_and_never_reads_as_a_success(instance):
+    _write(instance.users_path, _USERS_WITH_VIEWERS)
+    _live(instance, recipients=["rita"])
+    _write(instance.users_path, _USERS_WITH_VIEWERS_WITHOUT_REVENUE)
+    sender = RecordingSender()
+
+    outcome = _instance_worker(instance, sender, host="host-a").tick()[0]
+
+    assert outcome.outcome == OUTCOME_SUPPRESSED
+    assert sender.messages == []
+    health = _health(instance)
+    # A fire that reached nobody proves nothing about the mail path.
+    assert health.state == HEALTH_NEVER_SENT
+    assert health.attempts[0].outcome == ATTEMPT_SUPPRESSED
+    assert health.attempts[0].recipients == 0
+
+
+def test_a_failed_delivery_is_recorded_with_its_reason_and_a_streak(instance):
+    _live(instance)
+    sender = RecordingSender(fail_times=3)
+
+    outcome = _instance_worker(instance, sender, host="host-a").tick()[0]
+
+    assert outcome.outcome == OUTCOME_FAILED
+    # The command still says so, whatever the health log knows.
+    assert _report([outcome]) == 1
+    health = _health(instance)
+    assert health.state == HEALTH_FAILING
+    assert health.alive is False
+    assert health.streak == 1
+    assert health.last_failure_at == _NOW
+    assert "attempt 3 of 3 failed" in health.last_error
+    assert "the mail server is unavailable" in health.last_error
+
+
+def test_health_survives_a_restart_and_reads_stale_after_the_window(instance):
+    _live(instance)
+    _instance_worker(instance, RecordingSender(), host="host-a").tick()
+
+    # A new process, the same files: the last success is still on record.
+    later = _NOW + timedelta(days=3)
+    health = _health(instance, now=later)
+
+    assert health.last_success_at == _NOW
+    assert health.state == "stale"
+    assert health.alive is False
+
+
+def test_a_moved_instance_refuses_to_deliver_and_names_both_hosts(instance):
+    _live(instance)
+    _pin_identity(instance, host="host-a")
+    sender = RecordingSender()
+
+    outcome = _instance_worker(instance, sender, host="host-b").tick()[0]
+
+    # The refusal path sends nothing at all: no notification, no owner email,
+    # and not even an attempt against the transport.
+    assert sender.messages == []
+    assert sender.attempts == 0
+    assert outcome.outcome == OUTCOME_FAILED
+    assert outcome.delivery is not None
+    assert outcome.delivery.status == "failed"
+    assert outcome.error.startswith("instance_identity_mismatch")
+    assert "host-a" in outcome.error and "host-b" in outcome.error
+    assert _report([outcome]) == 1
+
+    rows = _audit_rows(instance)
+    mismatch = [row for row in rows if row["event_type"] == "instance_identity_mismatch"]
+    assert len(mismatch) == 1
+    assert mismatch[0]["status"] == "denied"
+    assert mismatch[0]["capability"] == "admin"
+    assert mismatch[0]["username"] == "worker"
+    assert "host-a" in mismatch[0]["error"] and "host-b" in mismatch[0]["error"]
+    # The evaluation still happened and is still audited: only delivery stopped.
+    assert _fire_rows(instance)[0]["verdict"] == "fire"
+    assert "alert_fired" not in [row["event_type"] for row in rows]
+    assert _health(instance).state == HEALTH_FAILING
+
+
+def test_a_refused_delivery_leaves_the_identity_alone(instance):
+    _live(instance)
+    _pin_identity(instance, host="host-a")
+    before = IdentityStore(instance.settings.settings_path).read()
+
+    _instance_worker(instance, RecordingSender(), host="host-b").tick()
+
+    after = IdentityStore(instance.settings.settings_path).read()
+    assert after == before
+    assert after.hostname == "host-a"
+
+
+def test_the_operator_confirms_the_move_and_delivery_resumes(instance):
+    _live(instance)
+    _pin_identity(instance, host="host-a")
+    sender = RecordingSender()
+
+    refused = _instance_worker(instance, sender, host="host-b").tick()[0]
+    assert refused.outcome == OUTCOME_FAILED
+    assert sender.messages == []
+
+    # The confirmation re-binds the instance and records where it came from.
+    confirming = _instance_worker(instance, sender, host="host-b", confirm=True)
+    assert confirming.identity_refusal() is None
+    moved = [row for row in _audit_rows(instance) if row["event_type"] == "instance_identity_moved"]
+    assert len(moved) == 1
+    assert moved[0]["status"] == "ok"
+    assert moved[0]["capability"] == "admin"
+    assert "host-a" in moved[0]["question"] and "host-b" in moved[0]["question"]
+    assert IdentityStore(instance.settings.settings_path).read().hostname == "host-b"
+
+    # The window already claimed above cannot fire again, so the next one proves
+    # a real send — with no flag, because the move is recorded now.
+    tomorrow = _local(2026, 10, 29, 9, 10)
+    delivered = _instance_worker(instance, sender, host="host-b", now=tomorrow).tick()[0]
+
+    assert delivered.outcome == OUTCOME_FIRED
+    assert len(sender.messages) == 1
+    assert _health(instance, now=tomorrow).state == HEALTH_HEALTHY
+
+
+def test_the_pinned_host_still_delivers_after_a_restart(instance):
+    _live(instance)
+    _pin_identity(instance, host="host-a")
+    sender = RecordingSender()
+
+    first = _instance_worker(instance, sender, host="host-a").tick()[0]
+    second = _instance_worker(
+        instance, sender, host="host-a", now=_local(2026, 10, 29, 9, 10)
+    ).tick()[0]
+
+    assert first.outcome == OUTCOME_FIRED
+    assert second.outcome == OUTCOME_FIRED
+    assert len(sender.messages) == 2
+
+
+def test_from_settings_wires_the_instance_record(instance):
+    worker = Worker.from_settings(
+        replace(instance.settings, instance_hostname="pinned-host"),
+        audit=instance.audit,
+        catalog=instance.catalog,
+        clock=lambda: _NOW,
+    )
+
+    assert worker.state is not None
+    assert worker.state.path == instance.settings.settings_path
+    assert worker.state.running_host == "pinned-host"
+    assert worker.confirm_instance_move is False
+
+
+def test_the_first_headless_delivery_pins_the_instance(instance):
+    """A `.env`-only install has no Settings page; its first send is its first configuration."""
+    _live(instance)
+    assert IdentityStore(instance.settings.settings_path).read() is None
+
+    outcome = _instance_worker(instance, RecordingSender(), host="host-a").tick()[0]
+
+    assert outcome.outcome == OUTCOME_FIRED
+    identity = IdentityStore(instance.settings.settings_path).read()
+    assert identity is not None
+    assert identity.hostname == "host-a"
+
+
+def test_the_command_refuses_a_moved_instance_with_its_own_exit_code(
+    instance, monkeypatch, capsys
+):
+    _live(instance)
+    _pin_identity(instance, host="host-a")
+    _command_env(instance, monkeypatch)
+    sender = RecordingSender()
+
+    code = worker_module.main([], sender=sender)
+
+    assert code == worker_module.EXIT_IDENTITY
+    assert code != 0
+    assert sender.attempts == 0
+    assert sender.messages == []
+    # Nothing was evaluated, so nothing was claimed for the window either.
+    assert _fire_rows(instance) == []
+    error = capsys.readouterr().err
+    assert "refused:" in error
+    assert "host-a" in error and running_hostname() in error
+
+
+def test_the_command_flag_confirms_the_move_and_delivers(instance, monkeypatch):
+    definition = _live(instance)
+    _pin_identity(instance, host="host-a")
+    _command_env(instance, monkeypatch)
+    sender = RecordingSender()
+
+    code = worker_module.main(["--confirm-instance-move"], sender=sender)
+
+    assert code == 0
+    assert len(sender.messages) == 1
+    assert sender.messages[0].fire_key.startswith(f"alert:{definition.id}:")
+    identity = IdentityStore(instance.settings.settings_path).read()
+    assert identity.hostname == running_hostname()
+    events = [row["event_type"] for row in _audit_rows(instance)]
+    assert events.count("instance_identity_moved") == 1
+    assert "instance_identity_mismatch" not in events

@@ -37,6 +37,14 @@ definition's owner once.
 The scheduled command refuses to run when no mail transport is configured. A
 cron job that ticks and quietly delivers nothing is the worst outcome, so a
 missing ``SMTP_HOST`` is an audited refusal with a non-zero exit code.
+
+The worker also keeps the instance's own account of itself, in the settings
+database (issue #28). One row per delivery attempt records the timestamp, the
+outcome and the redacted reason, so ``src.delivery_health`` can answer "is
+delivery alive?" from stored state alone. And the identity written at first
+configuration — one UUID, the host, the path — is checked before anything is
+sent: a process that is not that instance refuses to deliver, names both hosts,
+and says how an operator confirms a move that was intended.
 """
 
 from __future__ import annotations
@@ -45,7 +53,7 @@ import argparse
 import re
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from typing import Callable
 
@@ -61,9 +69,10 @@ from src.alert_eval import (
 from src.alerts import CONFIRMED, PAUSED, AlertDefinition, AlertService
 from src.audit import AuditLog
 from src.auth import user_named
-from src.capabilities import ALERT, authorize
+from src.capabilities import ADMIN, ALERT, authorize
 from src.config import ConfigError, Settings, load_settings
 from src.crypto import SecretKeyError
+from src.instance import InstanceState
 from src.mail_settings import resolve_mail_settings
 from src.db.factory import build_adapter
 from src.fires import FireStore
@@ -131,6 +140,10 @@ EVENT_RECIPIENT_BLOCKED = "alert_recipient_blocked"
 EVENT_DELIVERY_FAILED = "alert_delivery_failed"
 # The scheduled command refused to start because it had no mail transport.
 EVENT_DELIVERY_UNCONFIGURED = "alert_delivery_unconfigured"
+# The instance this database belongs to is not the instance this process is.
+# One event says a delivery was refused, the other records a confirmed move.
+EVENT_IDENTITY_MISMATCH = "instance_identity_mismatch"
+EVENT_IDENTITY_MOVED = "instance_identity_moved"
 
 _EVENT_FOR = {
     OUTCOME_FIRED: EVENT_FIRED,
@@ -179,7 +192,10 @@ DEFAULT_INTERVAL_SECONDS = 300
 # The exit code when the command refuses to start because it could not deliver a
 # fire. 1 is "a definition was refused or failed"; 2 is "the worker itself is
 # not fit to run", which is a different thing for whoever reads the alert mail.
+# 3 is "this process is not the instance that is configured to send": a moved or
+# copied directory, which is an operator decision and not a retry.
 EXIT_UNCONFIGURED = 2
+EXIT_IDENTITY = 3
 
 _IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
@@ -308,6 +324,8 @@ class Worker:
         titles: dict[str, str] | None = None,
         clock: Callable[[], datetime] | None = None,
         notifier: Notifier | None = None,
+        state: InstanceState | None = None,
+        confirm_instance_move: bool = False,
     ):
         self.service = service
         self.adapter = adapter
@@ -320,6 +338,16 @@ class Worker:
         # command never runs in that state (see ``main``), so the only way to
         # get here is a library call or a test.
         self.notifier = notifier
+        # The instance's own record: its identity and its delivery health, in
+        # the settings database. None is the pre-#28 worker a test builds by
+        # hand; ``from_settings`` always wires it, so a deployment records an
+        # attempt and refuses a moved instance without being asked to.
+        self.state = state
+        self.confirm_instance_move = confirm_instance_move
+        # Resolved once per tick, so one tick asks the identity question once
+        # and every fire in it gets the same answer.
+        self._identity_resolved = False
+        self._identity_refusal_reason: str | None = None
 
     @classmethod
     def from_settings(
@@ -331,6 +359,7 @@ class Worker:
         clock: Callable[[], datetime] | None = None,
         sender: MailSender | None = None,
         sleep: Callable[[float], None] | None = None,
+        state: InstanceState | None = None,
     ) -> Worker:
         """Build the worker the way a deployment does: everything from settings.
 
@@ -341,7 +370,8 @@ class Worker:
         than pretending a notification was sent. A stored secret that cannot
         be decrypted raises; it is not replaced with the environment password.
         ``sleep`` is the pause between delivery attempts, injected so no test
-        waits.
+        waits. ``state`` overrides the instance record, which is otherwise the
+        settings database itself.
         """
         settings = resolve_mail_settings(settings)
         log = audit if audit is not None else AuditLog(settings.audit_path)
@@ -360,7 +390,71 @@ class Worker:
                 titles=titles,
                 sleep=sleep,
             ),
+            state=(
+                state
+                if state is not None
+                else InstanceState(
+                    settings.settings_path, hostname=settings.instance_hostname
+                )
+            ),
+            confirm_instance_move=settings.confirm_instance_move,
         )
+
+    # -- the instance this worker is ---------------------------------------
+
+    def identity_refusal(self, *, confirm: bool | None = None) -> str | None:
+        """Why this process may not deliver, or None. Asked once per tick.
+
+        The identity row was written when the instance was first configured:
+        one UUID, the host it was set up on, and the path of its settings
+        database. A process whose host or path differs is not that instance —
+        it is a copy — and delivering from it would present the instance's
+        stored credential to real recipients as though nothing had happened. So
+        nothing is sent, and the refusal names both hosts.
+
+        ``confirm`` is the operator saying "I moved it": ``--confirm-instance-move``
+        or ``DAY1_CONFIRM_INSTANCE_MOVE=1``. It re-binds the identity to this
+        host and path and writes ``instance_identity_moved`` with where the
+        instance came from. Without it the record is never re-pointed, so a
+        copied directory cannot adopt itself by being started.
+        """
+        if self._identity_resolved:
+            return self._identity_refusal_reason
+        self._identity_resolved = True
+        self._identity_refusal_reason = None
+        if self.state is None:
+            return None
+        confirmed = self.confirm_instance_move if confirm is None else confirm
+        check = self.state.check(confirm=confirmed)
+        if check.adopted and check.moved_reason:
+            self._audit_identity(EVENT_IDENTITY_MOVED, check.moved_reason, status="ok")
+        if check.refused and check.reason:
+            self._identity_refusal_reason = check.reason
+            self._audit_identity(EVENT_IDENTITY_MISMATCH, check.reason, status="denied")
+        return self._identity_refusal_reason
+
+    def _audit_identity(self, event_type: str, text: str, *, status: str) -> None:
+        """One audit row for an instance-identity decision.
+
+        It carries ``capability=admin`` because the only remedy (confirm the
+        move, or put the database back where it belongs) is an operator's act.
+        A failure to write the row does not change the decision.
+        """
+        try:
+            self.service.audit.record_event(
+                username=WORKER_USERNAME,
+                role=WORKER_ROLE,
+                status=status,
+                event_type=event_type,
+                capability=ADMIN,
+                question=text,
+                tables=(),
+                sql=None,
+                row_count=None,
+                error=None if status == "ok" else text,
+            )
+        except Exception:
+            return
 
     # -- one tick ---------------------------------------------------------
 
@@ -376,6 +470,11 @@ class Worker:
         a definition that will not run would bury the events that matter.
         """
         now = self._clock()
+        # One tick, one answer to "is this process the instance that is
+        # configured to send". A mismatch is audited here once and then
+        # refuses every notification in the pass.
+        self._identity_resolved = False
+        self.identity_refusal()
         outcomes: list[FireOutcome] = []
         for definition in self.service.definitions():
             if definition.state not in (CONFIRMED, PAUSED):
@@ -471,6 +570,10 @@ class Worker:
             delivery = self._deliver(definition, metric, window, key, evaluation)
             outcome, message, error, status = self._apply_delivery(outcome, message, delivery)
             if delivery is not None:
+                # One row per finished notification, in the instance's own
+                # database: last success, last failure and its reason, the
+                # consecutive-failure streak, and this attempt's timestamp.
+                self._record_delivery_health(definition, key, delivery, now)
                 for skipped in delivery.blocked:
                     self._record_blocked(definition, metric, window, key, skipped)
         else:
@@ -576,6 +679,23 @@ class Worker:
         """
         if self.notifier is None or metric is None:
             return None
+        # Nothing is composed, and nothing is sent, from an instance whose
+        # database says it is somebody else. This is the second net: ``main``
+        # refuses a whole tick for the same reason, and this one covers a
+        # library caller and ``alert-cli run-now``.
+        refusal = self.identity_refusal()
+        if refusal:
+            return Delivery(
+                status=DELIVERY_FAILED,
+                fire_key=key,
+                error=f"instance_identity_mismatch: {refusal}",
+                message=f"No notification was sent. {refusal}",
+            )
+        if self.state is not None:
+            # The first delivery of a headless (``.env``) instance pins it here:
+            # that address plus that account is a sender, and a copy of it must
+            # not become a second one.
+            self.state.pin()
         handoff = FireOutcome(
             definition=definition,
             outcome=OUTCOME_FIRED,
@@ -635,6 +755,40 @@ class Worker:
         # Not wired, or not a fire: the comparison's outcome stands, and the
         # message says why nothing was sent.
         return outcome, f"{message} {delivery.message}", None, None
+
+    def _record_delivery_health(
+        self,
+        definition: AlertDefinition,
+        key: str,
+        delivery: Delivery,
+        now: datetime,
+    ) -> None:
+        """Record one finished notification in the instance's attempt log.
+
+        Delivered, suppressed and failed all land here, because all three say
+        something different about whether delivery is alive: a success proves
+        it, a failure disproves it, and a suppression is a fire that reached
+        nobody. A status with no health meaning — no sender wired, nothing to
+        send — is not recorded at all: the log holds attempts, not ticks.
+
+        A failure to write this row must not undo a delivery that happened, so
+        it is swallowed. The audit row is the governance record; this is the
+        operational one.
+        """
+        if self.state is None:
+            return
+        try:
+            self.state.record_delivery(
+                status=delivery.status,
+                at=now,
+                alert_id=definition.id,
+                fire_key=key,
+                recipients=len(delivery.recipients),
+                error=delivery.error,
+                sender=getattr(self.notifier, "sender", None),
+            )
+        except Exception:
+            return
 
     def _record_blocked(
         self,
@@ -891,11 +1045,21 @@ def main(argv: list[str] | None = None, *, sender: MailSender | None = None) -> 
         metavar="SECONDS",
         help=f"seconds to wait between ticks in loop mode (default {DEFAULT_INTERVAL_SECONDS})",
     )
+    parser.add_argument(
+        "--confirm-instance-move",
+        action="store_true",
+        help=(
+            "deliver from a host or path this instance's recorded identity does not "
+            "name, and record the move (the instance was moved or restored on purpose)"
+        ),
+    )
     args = parser.parse_args(argv)
     if args.interval < 1:
         parser.error("--interval must be at least 1 second")
 
     settings = load_settings()
+    if args.confirm_instance_move:
+        settings = replace(settings, confirm_instance_move=True)
     try:
         settings = resolve_mail_settings(settings)
     except (SecretKeyError, ConfigError) as exc:
@@ -912,6 +1076,13 @@ def main(argv: list[str] | None = None, *, sender: MailSender | None = None) -> 
         catalog=load_catalog(settings.routing_path),
         sender=transport,
     )
+
+    # Asked before the tick, so a moved or copied instance stops here with its
+    # own exit code instead of reporting "0 alert definitions were due".
+    refusal = worker.identity_refusal()
+    if refusal:
+        print(f"refused: {refusal}", file=sys.stderr)
+        return EXIT_IDENTITY
 
     if not args.loop:
         return _report(worker.tick())

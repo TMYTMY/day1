@@ -41,6 +41,11 @@ def env(tmp_path):
         embedding_provider="local",
         embedding_model="openai/text-embedding-3-small",
         embedding_api_key=None,
+        # The instance settings database belongs to this test, not to the
+        # checkout. The worker records its identity and its delivery health
+        # there (issue #28), and a shared file would let one test's instance
+        # identity refuse the next test's delivery.
+        settings_path=tmp_path / "instance.db",
     )
     return SimpleNamespace(
         settings=settings,

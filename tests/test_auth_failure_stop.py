@@ -207,7 +207,8 @@ def test_a_delivered_message_clears_the_streak(tmp_path):
 
     assert delivery.status == DELIVERY_DELIVERED
     assert guard.refusal(7) is None
-    assert read_health(alerts, 7).kind == "healthy"
+    # A new guard over the same file — the next tick — sees the cleared streak.
+    assert DeliveryGuard(alerts).refusal(7) is None
 
 
 def test_the_bound_lapses_after_the_window_so_one_probe_is_allowed(tmp_path):
@@ -324,11 +325,25 @@ def test_the_streak_is_in_storage_not_in_a_process(tmp_path):
     conn = sqlite3.connect(alerts)
     try:
         rows = conn.execute(
-            "SELECT outcome FROM delivery_attempts WHERE alert_id = 7"
+            "SELECT outcome FROM delivery_auth_attempts WHERE alert_id = 7"
         ).fetchall()
     finally:
         conn.close()
     assert [row[0] for row in rows] == [AUTH_FAILED] * AUTH_FAILURE_LIMIT
+
+
+def _tables(path) -> set[str]:
+    """The table names in one database file, or none when it does not exist."""
+    if not path.exists():
+        return set()
+    conn = sqlite3.connect(path)
+    try:
+        return {
+            row[0]
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+    finally:
+        conn.close()
 
 
 def test_a_success_is_recorded_as_delivered(tmp_path):
@@ -336,36 +351,45 @@ def test_a_success_is_recorded_as_delivered(tmp_path):
     guard.record_auth_failure(7)
     guard.record_success(7)
 
-    health = read_health(tmp_path / "alerts.db", 7)
-    assert health.kind == "healthy"
-    assert health.known is True
+    assert DeliveryGuard(tmp_path / "alerts.db").refusal(7) is None
 
     conn = sqlite3.connect(tmp_path / "alerts.db")
     try:
         outcome = conn.execute(
-            "SELECT outcome FROM delivery_attempts WHERE alert_id = 7 ORDER BY id DESC"
+            "SELECT outcome FROM delivery_auth_attempts WHERE alert_id = 7 ORDER BY id DESC"
         ).fetchone()[0]
     finally:
         conn.close()
     assert outcome == DELIVERED
 
 
-def test_the_notifier_writes_health_records_a_page_can_read(tmp_path):
-    """The delivery path is what fills the health line; a send that works says so."""
+def test_the_notifier_keeps_no_second_health_log(tmp_path):
+    """The alert database is authentication bookkeeping; health has one home.
+
+    Mutation: writing delivery health from the notifier again puts the old
+    ``delivery_attempts`` table back in this database, and the page would be
+    reading a log that only one half of the product fills.
+    """
     alerts = tmp_path / "alerts.db"
     notifier = _notifier(RecordingSender(), tmp_path, guard_path=alerts)
     notifier.deliver(_outcome(definition=_definition_owned()), METRIC)
 
-    assert read_health(alerts, 7).kind == "healthy"
+    tables = _tables(alerts)
+    assert "delivery_attempts" not in tables
+    assert "delivery_auth_attempts" in tables
+    # And the page's reader will not answer from this database at all: a store
+    # with no delivery log is unknown, never healthy.
+    assert read_health(alerts, 7).kind == "unknown"
 
 
 def test_from_settings_wires_the_guard_to_the_instance_alert_database(tmp_path):
     """The seam a deployment uses: the guard's file comes from the settings.
 
-    ``src/worker.py`` still builds ``Notifier`` directly (that file belongs to
-    another ticket), so this is the documented one-line wiring: a worker that
-    calls ``Notifier.from_settings`` records delivery health and remembers a
-    rejected password between ticks.
+    ``src/worker.py`` builds its notifier through ``Notifier.from_settings``
+    (issue #30), so the constructor asserted here is the one a tick uses: a
+    worker records the rejected password and remembers it between ticks.
+    Delivery *health* is recorded by the worker itself, in the settings
+    database (see ``tests/test_worker.py``).
     """
     from tests.test_notify import _smtp_settings
 
@@ -377,9 +401,9 @@ def test_from_settings_wires_the_guard_to_the_instance_alert_database(tmp_path):
     notifier = Notifier.from_settings(settings, sender=sender, sleep=lambda seconds: None)
 
     assert notifier.guard is not None
+    assert notifier.guard.path == settings.alerts_path
     for _ in range(AUTH_FAILURE_LIMIT):
         notifier.deliver(_outcome(definition=_definition_owned()), METRIC)
 
     # The refusal is readable from a guard opened separately, over the same file.
     assert DeliveryGuard(settings.alerts_path).refusal(7) is not None
-    assert read_health(settings.alerts_path, 7).kind == "failing"

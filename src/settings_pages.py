@@ -28,7 +28,8 @@ Three rules shape the mail page, and they are all about who is at the keyboard:
    instance database (see :mod:`src.send_safety`). The Alerts page carries the
    other half of the same story: one line per definition saying whether its
    deliveries are recorded, healthy, stale or failing — and saying so when there
-   are no records at all.
+   are no records at all. That line is read from the instance delivery log
+   (:mod:`src.delivery_health`), the one log the worker writes.
 """
 
 from __future__ import annotations

@@ -37,12 +37,15 @@ round; a deployment that needs a different bound passes it to
 file this module does not own.
 
 :func:`read_health` and :func:`health_line` are the read side: what this
-instance recorded about delivery for one definition. They are deliberately
-defensive. A missing database, a missing table, an unreadable file or an
-unexpected exception produce :data:`UNKNOWN`, and the line then says delivery
-health is unavailable. It never falls back to a healthy default: "I have no
-records" and "everything is fine" are the two answers a person must never have
-confused here.
+instance recorded about delivery for one definition. The record is the
+canonical delivery log in the instance's settings database
+(``Settings.settings_path``, :mod:`src.delivery_health`) — this module keeps no
+health records of its own, so the page and the worker cannot disagree about
+whether alerts are arriving. They are deliberately defensive. A store that is
+absent, unreadable or has never recorded an attempt produces :data:`UNKNOWN`,
+and the line then says delivery health is unavailable. It never falls back to a
+healthy default: "I have no records" and "everything is fine" are the two
+answers a person must never have confused here.
 
 Nothing in this module opens a socket, imports Streamlit or calls a model.
 """
@@ -59,6 +62,15 @@ from pathlib import Path
 
 from src.auth import user_named
 from src.config import Settings
+from src.delivery_health import (
+    DEFAULT_ALIVE_WINDOW,
+    HEALTH_FAILING as LOG_FAILING,
+    HEALTH_HEALTHY as LOG_HEALTHY,
+    HEALTH_NEVER_SENT as LOG_NEVER_SENT,
+    HEALTH_STALE as LOG_STALE,
+    DeliveryHealthStore,
+    delivery_health,
+)
 from src.models import User
 
 # --- the recipient rule ----------------------------------------------------
@@ -105,10 +117,11 @@ TEST_SEND_WINDOW_SECONDS = 15 * 60
 AUTH_FAILURE_LIMIT = 3
 AUTH_FAILURE_WINDOW_SECONDS = 6 * 60 * 60
 
-# How old a successful delivery may be before the health line calls it stale.
-# Two missed daily runs: at that point the worker is not delivering the alerts
-# the page would like to believe are flowing.
-STALE_AFTER_SECONDS = 48 * 60 * 60
+# How old a successful delivery may be before the health line calls it stale is
+# not a constant of this module: it is the instance's own expectation
+# (``Settings.delivery_alive_window``, ``DELIVERY_ALIVE_WINDOW_HOURS``), because
+# a daily digest and a monthly report are both healthy and only the operator
+# knows which this instance sends.
 
 
 def _stamp(now: datetime) -> str:
@@ -383,8 +396,13 @@ class MailTestLimiter:
 
 # --- authentication failures --------------------------------------------
 
-_CREATE_ATTEMPTS = """
-CREATE TABLE IF NOT EXISTS delivery_attempts (
+# The guard's own working state: the streak per definition. This is a fact
+# about presenting a credential, not a record of delivery health — that is the
+# ``delivery_attempts`` table in the instance's settings database
+# (``src.delivery_health``), written by the worker for every finished
+# notification.
+_CREATE_AUTH_ATTEMPTS = """
+CREATE TABLE IF NOT EXISTS delivery_auth_attempts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     alert_id INTEGER NOT NULL,
     at TEXT NOT NULL,
@@ -393,9 +411,9 @@ CREATE TABLE IF NOT EXISTS delivery_attempts (
 )
 """
 
-_CREATE_ATTEMPTS_INDEX = """
-CREATE INDEX IF NOT EXISTS idx_delivery_attempts_definition
-    ON delivery_attempts(alert_id, id DESC)
+_CREATE_AUTH_ATTEMPTS_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_delivery_auth_attempts_definition
+    ON delivery_auth_attempts(alert_id, id DESC)
 """
 
 _CREATE_AUTH_STATE = """
@@ -408,7 +426,11 @@ CREATE TABLE IF NOT EXISTS delivery_auth_state (
 )
 """
 
-# The outcomes a delivery attempt is recorded under.
+# The outcomes the guard's own auth log records. ``delivered`` means the server
+# accepted the credential and the streak was cleared; ``auth_failed`` means it
+# rejected it. ``FAILED`` is kept as the name for a non-authentication delivery
+# failure: that fact now lives in the instance delivery log
+# (``src.delivery_health``), written by the worker, not here.
 DELIVERED = "delivered"
 FAILED = "failed"
 AUTH_FAILED = "auth_failed"
@@ -439,6 +461,18 @@ class DeliveryGuard:
     beside the fire log, so a fact about delivery survives the process that
     learned it. A worker started by cron tomorrow must know that the password
     was rejected three times today; a dictionary in memory cannot tell it.
+
+    It keeps two things there, and neither is the instance's delivery health:
+
+    * ``delivery_auth_state`` — the streak, its first and last attempt, and
+      whether the owner has been told once about it;
+    * ``delivery_auth_attempts`` — one row per time that definition's
+      credential was presented and what came of it: rejected, or accepted (which
+      is what clears the streak).
+
+    Health is read from the settings database instead (:mod:`src.delivery_health`),
+    because the worker records every finished notification there. Duplicating
+    that log here is what made the Alerts page read a table nothing wrote.
     """
 
     def __init__(
@@ -466,8 +500,8 @@ class DeliveryGuard:
         conn = self._connect()
         try:
             with conn:
-                conn.execute(_CREATE_ATTEMPTS)
-                conn.execute(_CREATE_ATTEMPTS_INDEX)
+                conn.execute(_CREATE_AUTH_ATTEMPTS)
+                conn.execute(_CREATE_AUTH_ATTEMPTS_INDEX)
                 conn.execute(_CREATE_AUTH_STATE)
                 yield conn
         finally:
@@ -536,7 +570,8 @@ class DeliveryGuard:
         stamp = _stamp(moment)
         with self._session() as conn:
             conn.execute(
-                "INSERT INTO delivery_attempts (alert_id, at, outcome, error) VALUES (?, ?, ?, ?)",
+                "INSERT INTO delivery_auth_attempts (alert_id, at, outcome, error) "
+                "VALUES (?, ?, ?, ?)",
                 (int(alert_id), stamp, AUTH_FAILED, error),
             )
             row = conn.execute(
@@ -589,30 +624,21 @@ class DeliveryGuard:
             )
 
     def record_success(self, alert_id: int, *, at: datetime | None = None) -> None:
-        """Record a delivered message and clear the streak, mark and notice."""
+        """Record that the credential was accepted, and clear the streak.
+
+        The row is the evidence behind the cleared streak: a later reader can
+        see that this definition's last presentation succeeded, not merely that
+        the state row is gone.
+        """
         moment = at or _now(self._clock)
         with self._session() as conn:
             conn.execute(
-                "INSERT INTO delivery_attempts (alert_id, at, outcome, error) VALUES (?, ?, ?, NULL)",
+                "INSERT INTO delivery_auth_attempts (alert_id, at, outcome, error) "
+                "VALUES (?, ?, ?, NULL)",
                 (int(alert_id), _stamp(moment), DELIVERED),
             )
             conn.execute(
                 "DELETE FROM delivery_auth_state WHERE alert_id = ?", (int(alert_id),)
-            )
-
-    def record_failure(
-        self,
-        alert_id: int,
-        *,
-        at: datetime | None = None,
-        error: str | None = None,
-    ) -> None:
-        """Record a non-authentication failure, for the health line's count."""
-        moment = at or _now(self._clock)
-        with self._session() as conn:
-            conn.execute(
-                "INSERT INTO delivery_attempts (alert_id, at, outcome, error) VALUES (?, ?, ?, ?)",
-                (int(alert_id), _stamp(moment), FAILED, error),
             )
 
 
@@ -655,53 +681,45 @@ def read_health(
     alert_id: int,
     *,
     now: datetime | None = None,
-    stale_after_seconds: float = STALE_AFTER_SECONDS,
+    window: timedelta | None = None,
 ) -> Health:
-    """Read the delivery records for one definition, or say they are unavailable.
+    """Read the delivery health of one definition, or say it is unavailable.
 
-    Every failure mode ends in :data:`UNKNOWN`: no database, no table, an
-    unreadable file, a row that is not a timestamp. None of them ends in
-    :data:`HEALTHY`, because a page that shows a green line when it read nothing
-    is worse than a page with no line at all.
+    ``path`` is the instance settings database (``Settings.settings_path``),
+    and the answer comes from :mod:`src.delivery_health` — the one log the
+    worker writes. This function is the page's vocabulary on top of that
+    answer, not a second reader: it exists to tell "this instance has no
+    delivery records at all" (which the page must never render as healthy)
+    apart from "this definition has none" (``never_sent``, which is true).
+
+    Every failure mode ends in :data:`UNKNOWN`: no database, no attempt table,
+    an unreadable file, a raise from the store beneath. None of them ends in
+    :data:`HEALTHY`, because a page that shows a green line when it read
+    nothing is worse than a page with no line at all.
     """
-    database = Path(path)
-    if not database.exists():
+    store = DeliveryHealthStore(Path(path))
+    if not store.has_log():
         return Health(kind=UNKNOWN)
-    try:
-        conn = sqlite3.connect(f"{database.resolve().as_uri()}?mode=ro", uri=True, timeout=5)
-    except sqlite3.Error:
-        return Health(kind=UNKNOWN)
-    try:
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            "SELECT at, outcome, error FROM delivery_attempts "
-            "WHERE alert_id = ? ORDER BY id DESC",
-            (int(alert_id),),
-        ).fetchall()
-    except sqlite3.Error:
-        return Health(kind=UNKNOWN)
-    finally:
-        conn.close()
-    if not rows:
-        return Health(kind=NEVER_SENT)
-    moment = now or datetime.now(timezone.utc)
-    latest = _parse(rows[0]["at"])
-    if rows[0]["outcome"] == DELIVERED and latest is not None:
-        age = (moment - latest).total_seconds()
-        if age > stale_after_seconds:
-            return Health(kind=STALE, count=0, last_at=latest)
-        return Health(kind=HEALTHY, count=0, last_at=latest)
-    consecutive = 0
-    for row in rows:
-        if row["outcome"] == DELIVERED:
-            break
-        consecutive += 1
-    return Health(
-        kind=FAILING,
-        count=consecutive,
-        last_at=latest,
-        error=rows[0]["error"],
+    health = delivery_health(
+        store.path,
+        alert_id=int(alert_id),
+        now=now,
+        window=window or DEFAULT_ALIVE_WINDOW,
     )
+    if health.state == LOG_NEVER_SENT:
+        return Health(kind=NEVER_SENT)
+    if health.state == LOG_HEALTHY:
+        return Health(kind=HEALTHY, last_at=health.last_success_at)
+    if health.state == LOG_STALE:
+        return Health(kind=STALE, last_at=health.last_success_at)
+    if health.state == LOG_FAILING:
+        return Health(
+            kind=FAILING,
+            count=health.streak,
+            last_at=health.last_failure_at,
+            error=health.last_error,
+        )
+    return Health(kind=UNKNOWN)
 
 
 def _age_words(moment: datetime | None, now: datetime) -> str:
@@ -722,14 +740,25 @@ def _age_words(moment: datetime | None, now: datetime) -> str:
 def health_line(definition: object, settings: Settings, *, now: datetime | None = None) -> str:
     """The one line the Alerts page shows about delivery, for one definition.
 
+    The record it reads is the canonical delivery log in this instance's
+    settings database (:mod:`src.delivery_health`), narrowed to this
+    definition, with the stale window the instance itself configured. That is
+    the same log the worker writes a row to for every finished notification, so
+    the line cannot report on a table nothing fills.
+
     Never raises: a health record that cannot be read is a line that says so.
-    That is the whole point of the seam — #28 owns the records, and this page
-    must be honest both before they exist and after.
+    That honesty is the point of the seam — a line is either backed by a
+    recorded attempt or it says the records are unavailable.
     """
     alert_id = int(getattr(definition, "id", 0) or 0)
     moment = now or datetime.now(timezone.utc)
     try:
-        health = read_health(Path(settings.alerts_path), alert_id, now=moment)
+        health = read_health(
+            Path(settings.settings_path),
+            alert_id,
+            now=moment,
+            window=settings.delivery_alive_window,
+        )
     except Exception:  # noqa: BLE001 - a page must not die reading a health record
         return UNAVAILABLE
     if health.kind == UNKNOWN:

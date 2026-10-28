@@ -79,6 +79,7 @@ from src.notify import (
     build_sender,
     missing_smtp,
 )
+from src.redaction import redact_transport_error
 from src.routing import Catalog, load_catalog
 
 # The actor every worker-written audit row names. A fire is not a person's
@@ -592,12 +593,17 @@ class Worker:
         except Exception as exc:
             # A notification that cannot even be prepared is this definition's
             # failure, not the tick's. Every other definition still runs, which
-            # is the same rule the evaluation path follows.
+            # is the same rule the evaluation path follows. The text is
+            # redacted before it reaches an audit row: this path can wrap a
+            # transport error, and a transport error can quote the AUTH line.
+            detail = redact_transport_error(
+                exc, sender=getattr(self.notifier, "sender", None)
+            )
             return Delivery(
                 status=DELIVERY_FAILED,
                 fire_key=key,
-                error=f"notification_failed: {exc}",
-                message=f"The notification could not be prepared: {exc}.",
+                error=f"notification_failed: {detail}",
+                message=f"The notification could not be prepared: {detail}.",
             )
 
     @staticmethod

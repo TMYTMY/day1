@@ -48,6 +48,7 @@ from src.capabilities import ALERT, QUERY, authorize, join_names
 from src.config import ConfigError, Settings
 from src.metrics import Metric
 from src.models import User
+from src.redaction import redact_exception, redact_transport_error
 
 if TYPE_CHECKING:  # the worker imports this module; this keeps that one-way
     from src.worker import FireOutcome
@@ -122,6 +123,23 @@ class MailSender(Protocol):
     def send(self, message: MailMessage) -> None: ...
 
 
+def _header_value(value: str, field: str) -> str:
+    """A header value with no line break in it.
+
+    ``EmailMessage`` also refuses one, but it refuses at the moment the message
+    is composed, which is after the recipient list has been assembled from the
+    directory and after a retry may already have been attempted. Checking here
+    names the field instead.
+    """
+    text = str(value)
+    if "\n" in text or "\r" in text:
+        raise ConfigError(
+            f"The {field} header must not contain a line break. "
+            "A newline in a header value is how a second header gets written."
+        )
+    return text
+
+
 @dataclass
 class RecordingSender:
     """An in-memory sender: the seam the tests replace SMTP with.
@@ -189,11 +207,16 @@ class SmtpSender:
         Separated from :meth:`send` so the composed email can be inspected
         without a server: the body stays plain text, which is what a person
         reading an alert in a terminal or a watch wants.
+
+        Every header value is checked for a line break first. A newline inside
+        ``From``, ``To`` or ``Subject`` is not a formatting problem: it is how
+        an extra header (``Bcc:``, ``Content-Type:``) gets written by a value
+        that was supposed to be data.
         """
         mail = EmailMessage()
-        mail["From"] = self.sender
-        mail["To"] = ", ".join(message.to)
-        mail["Subject"] = message.subject
+        mail["From"] = _header_value(self.sender, "From")
+        mail["To"] = ", ".join(_header_value(address, "To") for address in message.to)
+        mail["Subject"] = _header_value(message.subject, "Subject")
         mail.set_content(message.body)
         return mail
 
@@ -202,8 +225,17 @@ class SmtpSender:
 
         This is the only network call in the alert path. Nothing is cached, so
         a failure is a failure for this attempt and the notifier decides what
-        to do about it.
+        to do about it. The failure is redacted in place before it leaves this
+        method: a server reply can quote the ``AUTH`` line, and that line is
+        the credential.
         """
+        try:
+            self._deliver(message)
+        except Exception as exc:
+            redact_exception(exc, password=self.password, user=self.user)
+            raise
+
+    def _deliver(self, message: MailMessage) -> None:
         mail = self.message_for(message)
         # Certificates are verified, and there is deliberately no way to turn that
         # off. smtplib's default context does NOT verify (ssl._create_stdlib_context
@@ -499,7 +531,11 @@ class Notifier:
             try:
                 self.sender.send(message)
             except Exception as exc:  # a transport failure is data, not a crash
-                error = f"attempt {attempt} of {self._attempts} failed: {exc}"
+                # The server's own words, minus the credential. A reply can
+                # quote the AUTH line, and this string goes into an audit row,
+                # the owner's email and the fire's message.
+                detail = redact_transport_error(exc, sender=self.sender)
+                error = f"attempt {attempt} of {self._attempts} failed: {detail}"
                 if attempt < self._attempts:
                     self._sleep(self._backoff[min(attempt - 1, len(self._backoff) - 1)])
                 continue
@@ -646,5 +682,7 @@ class Notifier:
             assert self.sender is not None  # deliver() checked this already
             self.sender.send(message)
         except Exception as exc:
-            return False, f"sending it also failed: {exc}"
+            return False, (
+                "sending it also failed: " + redact_transport_error(exc, sender=self.sender)
+            )
         return True, None

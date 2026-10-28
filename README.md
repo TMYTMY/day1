@@ -205,8 +205,8 @@ The flags are the point: every label ships `reviewed: false`, and the harness pr
 | `EMBEDDING_API_KEY` | Key for the embeddings call. Falls back to `OPENROUTER_API_KEY` when the provider is `openrouter`. |
 | `KNOWLEDGE_PATH` | On-disk index directory. Default `data/knowledge`. |
 | `ALERTS_PATH` | The instance's alert database: definitions and fires. Default `data/alerts.db`. Two instances must never share it. |
-| `SETTINGS_PATH` | Instance settings database. Default `data/instance.db`. Encrypted mail settings live here and win over `SMTP_*` when a value is present. |
-| `DAY1_SECRET_KEY` | Fernet key for that database. Create it with `python -m src.mail_setup --init-key` (mode 600, other lines untouched). Without it the Settings page refuses to save and does not store a password in the clear. A wrong key is an error, not a fallback to `SMTP_PASSWORD`. |
+| `SETTINGS_PATH` | Instance settings database. Default `data/instance.db`. Encrypted mail settings live here, and they are the whole transport or none of it: if anything about the transport is stored, every mail field resolves from the database and none from `SMTP_*`. |
+| `DAY1_SECRET_KEY` | Fernet key for that database. Create it with `python -m src.mail_setup --init-key` (mode 600, other lines untouched). Without it the Settings page refuses to save and does not store a password in the clear. A wrong key is an error, not a fallback to `SMTP_PASSWORD`: the store keeps a key-check value written with the first secret and refuses to read or write under a key that does not reproduce it. `--init-key` itself refuses when the database already holds ciphertext, because a new key could never read it. |
 | `MAX_ALERT_WINDOW_DAYS` | The longest window an alert definition may name, in days. Default 365. A longer window is refused with this number in the message; it is never clamped. |
 | `SMTP_HOST` | The mail host a fire is delivered through when the settings database has no host. Unset, and no database host, means the worker refuses to start: nothing is evaluated and dropped. |
 | `SMTP_PORT` | Submission port. Default 587. |
@@ -279,11 +279,18 @@ both.
 
 The same presets are on **Mail settings** in the sidebar, and **Alerts** lists
 every definition. Both pages require the `admin` capability (the demo `owner`
-account). The page writes the encrypted settings database; a value there wins
-over this file, and a blank password keeps the stored one. `python -m src.mail_setup --init-key`
-creates `DAY1_SECRET_KEY` when `.env` does not already hold one. Day 1 still
-signs in with a demo password. Settings is not a substitute for authentication
-on an instance exposed to the public.
+account). The page writes the encrypted settings database, and a value there is
+the whole transport for the instance: nothing is assembled half from the
+database and half from this file. A blank password keeps the stored one only
+while the host, port, username and TLS mode are still the ones it was entered
+for — changing any of them without typing the password again is refused, so a
+stored credential is never presented to a server it was not given to. Clearing
+the stored settings leaves a tombstone, so `SMTP_PASSWORD` here cannot bring a
+cancelled password back. `python -m src.mail_setup --init-key` creates
+`DAY1_SECRET_KEY` when `.env` does not already hold one, and refuses when the
+settings database already holds ciphertext: a key minted then could never read
+it. Day 1 still signs in with a demo password. Settings is not a substitute for
+authentication on an instance exposed to the public.
 
 ## Alerts: the worker
 

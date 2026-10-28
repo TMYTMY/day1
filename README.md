@@ -129,13 +129,15 @@ The proxy terminates TLS and decides who may connect. The app keeps its role che
 
 ## Sign in
 
-`config/users.yaml` is a stand-in for SSO. `src/auth.py` is the function to replace with the company identity provider. Everyone else in the app only sees a username, a role, and the tables that role may use.
+`config/users.yaml` is a stand-in for SSO. `src/auth.py` is the function to replace with the company identity provider. Everyone else in the app only sees a username, a role, the tables that role may use, and the capabilities it may run.
 
-| Username | Password | Role | Tables |
-| --- | --- | --- | --- |
-| analyst | analyst | analyst | revenue, dau |
-| finance | finance | finance | revenue |
-| growth | growth | growth | dau |
+| Username | Password | Role | Tables | Capabilities |
+| --- | --- | --- | --- | --- |
+| analyst | analyst | analyst | revenue, dau | query |
+| finance | finance | finance | revenue | query |
+| growth | growth | growth | dau | query |
+
+A role holds two grants. The table grant says what an action may read; the capability grant says which actions the role may run (`query` answers a question, and a second capability will add its own name). Both are checked at one boundary in `src/capabilities.py`, and neither replaces the other: a role with `query` but no matching table is refused, and a role with the table but no `query` is refused before routing. A role with no `capabilities` key implies `[query]`, so an older `users.yaml` keeps working. See `docs/migration/0001-capability-grants.md`. Refusals name the capability or the table and the role, and are appended to the audit log like any other outcome.
 
 ## Try these
 
@@ -219,7 +221,7 @@ Questions that match nothing get a clarifying reply that lists only the topics t
 
 ```mermaid
 flowchart LR
-  ask[Question] --> auth[Role and allowed tables]
+  ask[Question] --> auth[Role, capability, and allowed tables]
   auth --> route[Routing map]
   route --> prompt[Schema for the matched table]
   kb[Knowledge base notes] -.-> prompt
@@ -230,13 +232,13 @@ flowchart LR
   out --> log[Audit log]
 ```
 
-The dotted notes are optional. They are retrieved after the routing map has already chosen one permitted table, and only for a language-model request. The routing map still chooses the table.
+The dotted notes are optional. They are retrieved after the routing map has already chosen one permitted table, and only for a language-model request. The routing map still chooses the table. The capability grant and the table grant are both decided by `authorize()` in `src/capabilities.py` before the routing map's tables reach a prompt or a planner, so the gate still runs ahead of SQL generation.
 
 The allowlist parses the statement and keeps a single `SELECT` or `WITH ... SELECT`. Inserts, updates, deletes, DDL, pragmas, attached databases, and file functions are rejected. Physical tables have to be inside the caller's allowlist, including tables hidden behind a CTE. SQLite is opened with `mode=ro` and `PRAGMA query_only`, so a write still fails if a statement gets past the parser.
 
 Results wider than the preview are truncated on screen. CSV and HTML download the fetched rows and only the columns in that result.
 
-Each question is appended to the audit database with the user, role, tables, SQL, status, and row count.
+Each question is appended to the audit database with the user, role, capability, event type, tables, SQL, status, and row count. One writer on the audit store (`AuditLog.record_event`) builds the row, so every outcome — ok, clarify, denied, blocked, failed — writes exactly one row, and a capability that lands later writes the same shape.
 
 ## Swap in Postgres or Athena
 
@@ -249,7 +251,7 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-The tests cover routing, the role map, the SELECT allowlist, blocked writes, CSV/HTML export, the revenue, DAU, unknown-topic, and permission paths, and the knowledge base (upload, search, delete, and notes that do not replace routing). The retrieval harness, the label review gate, the note ablation, the seeded window, and the answer-cache identity have their own tests. Nothing in the suite asserts a retrieval score — the numbers above are measured by the script, so a regression shows up as a number that moved, not as a test that was quietly loosened.
+The tests cover routing, the role map, the capability gate and its refusals, the SELECT allowlist, blocked writes, CSV/HTML export, the revenue, DAU, unknown-topic, and permission paths, and the knowledge base (upload, search, delete, and notes that do not replace routing). The retrieval harness, the label review gate, the note ablation, the seeded window, and the answer-cache identity have their own tests. Nothing in the suite asserts a retrieval score — the numbers above are measured by the script, so a regression shows up as a number that moved, not as a test that was quietly loosened.
 
 ## Copyright
 

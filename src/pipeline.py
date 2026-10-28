@@ -8,7 +8,9 @@ from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
 
-from src.audit import AuditEvent, AuditLog
+from src.audit import AuditLog
+from src.capabilities import QUERY as CAPABILITY_QUERY
+from src.capabilities import authorize, join_names
 from src.config import Settings, redact
 from src.db.resolve import resolve_table
 from src.db.sqlite import QueryExecutionError
@@ -36,11 +38,7 @@ _MAX_QUESTION_CHARS = 2000
 def _join(titles: list[str]) -> str:
     if not titles:
         return "the tables on your role"
-    if len(titles) == 1:
-        return titles[0]
-    if len(titles) == 2:
-        return f"{titles[0]} and {titles[1]}"
-    return ", ".join(titles[:-1]) + f", and {titles[-1]}"
+    return join_names(titles)
 
 
 def _allowed_topics(catalog: Catalog, allowed: set[str]) -> list[str]:
@@ -144,22 +142,30 @@ def _record(
     metric_id: str | None = None,
     definition_digest: str | None = None,
     source_id: str | None = None,
+    event_type: str = "question",
+    capability: str = CAPABILITY_QUERY,
 ) -> bool:
+    """Redact the error and hand the row to the one shared audit writer.
+
+    The row itself is built and inserted by ``AuditLog.record_event``, so a
+    second capability writes the same shape of row without copying this code.
+    A write failure costs the note, never the answer.
+    """
     try:
-        audit.write(
-            AuditEvent(
-                username=user.username,
-                role=user.role,
-                question=question,
-                routed_tables=tuple(tables),
-                sql=sql,
-                status=status,
-                row_count=row_count,
-                error=redact(error, settings.openrouter_api_key, settings.db_password) if error else None,
-                metric_id=metric_id,
-                definition_hash=definition_digest,
-                source_id=source_id,
-            )
+        audit.record_event(
+            username=user.username,
+            role=user.role,
+            status=status,
+            event_type=event_type,
+            capability=capability,
+            question=question,
+            tables=tables,
+            sql=sql,
+            row_count=row_count,
+            error=redact(error, settings.openrouter_api_key, settings.db_password) if error else None,
+            metric_id=metric_id,
+            definition_hash=definition_digest,
+            source_id=source_id,
         )
         return True
     except sqlite3.Error:
@@ -329,7 +335,7 @@ def answer_question(
     data_window: str | None = None
     routed_source_id = _routed_source_id(route.tables, sources, catalog, adapter)
 
-    def finish(answer: Answer, error: str | None = None) -> Answer:
+    def finish(answer: Answer, error: str | None = None, event_type: str = "question") -> Answer:
         metric_id = answer.metric_id
         digest = None
         if selected is not None:
@@ -354,6 +360,7 @@ def answer_question(
             metric_id=metric_id,
             definition_digest=digest,
             source_id=routed_source_id,
+            event_type=event_type,
         )
         answer.audit_saved = saved
         if not saved:
@@ -380,19 +387,31 @@ def answer_question(
                 pass
         return answer
 
+    # One boundary, two questions. The capability grant is checked first, then
+    # the tables the route selected. Both run before any SQL exists, and a
+    # refusal returns the gate's message, which names the capability or the
+    # tables and the role.
+    grant = authorize(user, CAPABILITY_QUERY)
+    if not grant.allowed:
+        return finish(
+            Answer(status="denied", message=grant.message or ""),
+            error=grant.reason,
+            event_type="capability_refusal",
+        )
+
     if not route.matched:
         return finish(Answer(status="clarify", message=_clarify(catalog, allowed)))
 
-    permitted = [table for table in route.tables if table in allowed]
-    denied = [table for table in route.tables if table not in allowed]
+    decision = authorize(user, CAPABILITY_QUERY, route.tables)
+    denied = list(decision.tables)
+    permitted = [table for table in route.tables if table not in denied]
     if not permitted:
-        denied_titles = [topic.title for topic in route.topics if any(table in denied for table in topic.tables)]
-        verb = "is" if len(denied_titles) == 1 else "are"
-        message = (
-            f"{_join(denied_titles)} {verb} outside the {user.role} role. "
-            f"You can ask about {_join(_allowed_topics(catalog, allowed))}."
+        message = f"{decision.message or ''} You can ask about {_join(_allowed_topics(catalog, allowed))}."
+        return finish(
+            Answer(status="denied", message=message),
+            error=decision.reason,
+            event_type="capability_refusal",
         )
-        return finish(Answer(status="denied", message=message))
     if len(route.tables) > 1:
         titles = [topic.title for topic in route.topics]
         if denied:

@@ -10,6 +10,9 @@ class User:
     username: str
     role: str
     allowed_tables: tuple[str, ...]
+    # Capability grants. The default is the pre-capability behaviour: a role
+    # that may ask a question. See src/capabilities.py.
+    capabilities: tuple[str, ...] = ("query",)
 
 
 @dataclass(frozen=True)

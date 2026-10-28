@@ -46,6 +46,10 @@ Day 1's domain language. One meaning per term. If a word is overloaded, this fil
 
 **Suppressed** — a fire whose comparison triggered but where no named recipient may still read the metric. Nothing is sent, and the outcome is its own word: suppressed is neither a success nor an error, because the evaluation was right and the audience was empty.
 
+**Delivery health** — what the instance knows about whether delivery still works, recorded in its own settings database: one row per attempt, the last success, the last failure with its redacted reason, and the run of consecutive failures. It answers from stored state alone, with no send and no network, in one of four states: `never_sent` (nothing proves the path works), `healthy` (a delivery inside the expected window), `stale` (nothing inside it — either nothing fired or delivery stopped), and `failing` (the recent attempts failed and nothing has succeeded since). A suppression is recorded and is **not** an attempt: it never reached a server, so it neither proves delivery works nor hides a failure behind it.
+
+**Instance identity** — the UUID, hostname and settings-database path an instance writes at first configuration. A delivery from a host or path that row does not name is refused and audited (`instance_identity_mismatch`), because a copy of an instance directory plus its `.env` would otherwise be a second sender with the same credentials and the same real recipients. A move is confirmed explicitly (`--confirm-instance-move`, or `DAY1_CONFIRM_INSTANCE_MOVE=1`), which re-binds the row, audits `instance_identity_moved`, and keeps the same UUID.
+
 **Fire key** — the uniqueness key of a fire, built from the alert definition's identity plus the resolved window end. It exists so a restart, a double launch, or an overlapping tick cannot deliver the same period twice.
 
 **State change** — the transition of a comparison from not-triggered to triggered, or back. Recorded for audit and for the notification body, and deliberately **not** used to suppress notifications: a breach that persists is still news.

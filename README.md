@@ -239,6 +239,9 @@ The flags are the point: every label ships `reviewed: false`, and the harness pr
 | `SMTP_USER`, `SMTP_PASSWORD` | Credentials for the relay. Optional: a local relay that needs none is left alone. |
 | `SMTP_FROM` | The from-address on a notification. Defaults to `SMTP_USER` when that is an address, then to `day1-alerts@localhost`. |
 | `SMTP_STARTTLS` | `true` (default) asks the relay to upgrade the connection. `0`, `false`, `no`, or `off` turns it off. |
+| `DELIVERY_ALIVE_WINDOW_HOURS` | How long delivery may go without a successful send before the instance calls itself stale. Default 26 (a daily alert plus one late tick and one missed tick). Set it to your slowest cadence plus a day of slack: `168` for a weekly digest. |
+| `DAY1_INSTANCE_HOSTNAME` | The name this instance reports as its own. Unset means `socket.gethostname()`. Set it when the hostname is not stable, such as a container that gets a fresh random id on every start. |
+| `DAY1_CONFIRM_INSTANCE_MOVE` | `1` confirms that this instance was moved or restored on purpose, so the worker delivers from a host and path its identity row does not name and re-binds the row. Unset is the safe default: a copied instance directory refuses to send. |
 | `SEED_END` | Last date in the seeded demo window (`YYYY-MM-DD`). Default: three days before today, so the demo data does not age. The window is 119 days long and the file rebuilds when the date changes. |
 
 The API key and database password are read from the environment inside the server process. They are not written into the prompt, the page, or the export.
@@ -403,7 +406,40 @@ Persistent=true
 WantedBy=timers.target
 ```
 
-The exit code is 0 when the tick ran, and 1 when a definition was refused, failed to evaluate, failed to deliver, or fired with nobody able to receive it. `2` means the worker refused to start at all because no mail transport is configured. Cron and systemd surface each one instead of swallowing it — set `MAILTO` (cron) or `OnFailure=` (systemd) on the unit if you want the failure in your inbox as well as the log.
+The exit code is 0 when the tick ran, and 1 when a definition was refused, failed to evaluate, failed to deliver, or fired with nobody able to receive it. `2` means the worker refused to start at all because no mail transport is configured, and `3` that this process is not the instance the database belongs to (a moved or copied directory). Cron and systemd surface each one instead of swallowing it — set `MAILTO` (cron) or `OnFailure=` (systemd) on the unit if you want the failure in your inbox as well as the log.
+
+### Is delivery alive? And is this the instance that was configured?
+
+A governance product whose alerts stop arriving is worse than one with no alerts, because silence reads as "nothing happened". So the worker keeps an account of its own delivery in the instance settings database — the same file the mail settings live in, which survives a restart and needs no key to read:
+
+- one row per delivery attempt: its timestamp, the fire key, how many people it reached, and for a failure the transport's own reason, redacted (`AUTH` lines and their base64 forms never reach the log);
+- from those rows, the last success, the last failure, and the run of consecutive failures.
+
+`src.delivery_health.delivery_health(settings.settings_path, window=settings.delivery_alive_window)` answers "is delivery alive?" from that stored state alone — no network, no send, no mail credential — and returns one state:
+
+| State | Meaning |
+| --- | --- |
+| `never_sent` | Nothing has ever been delivered from this instance, so nothing proves the mail path works. |
+| `healthy` | A notification was delivered inside the window. |
+| `stale` | Nothing was delivered inside the window: either nothing fired, or delivery has stopped. The two look identical from outside, and the words say so instead of guessing. |
+| `failing` | The last send attempts failed and nothing has succeeded since. `last_error` carries the reason. |
+
+A suppression — a fire nobody who was named may still be told about — is recorded, but it is not an attempt: nothing was offered to a server, so it neither proves delivery works nor hides a failure behind it. The window is `DELIVERY_ALIVE_WINDOW_HOURS` rather than a constant, because a daily digest and a monthly report are both healthy and only the operator knows which this instance sends.
+
+The instance also records **who it is** at first configuration: one generated UUID, the host it was configured on, and the path of that settings database. A delivery from a host or path the row does not name is refused, and the refusal names both — because a copy of an instance directory plus its `.env` is a second sender with the same credentials, the same recipients and the same real thresholds. Nothing is composed, nothing is sent, the refusal is audited (`instance_identity_mismatch`, `capability=admin`), and the command exits `3`.
+
+A move that is intended is one explicit decision:
+
+```bash
+python -m src.worker --confirm-instance-move        # this run
+DAY1_CONFIRM_INSTANCE_MOVE=1 python -m src.worker   # or in .env
+```
+
+That re-binds the identity to the new host and path, writes `instance_identity_moved` naming where the instance came from, and keeps the same UUID: it is the same instance, and its definitions, fire keys and audit trail belong to it. Nothing in the row is a secret, so it can be read with the database closed:
+
+```bash
+sqlite3 data/instance.db 'select instance_id, hostname, instance_path, recorded_at from instance_identity'
+```
 
 ## Swap in Postgres or Athena
 
@@ -416,7 +452,7 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-The tests cover routing, the role map, the capability gate and its refusals, the SELECT allowlist, blocked writes, CSV/HTML export, the revenue, DAU, unknown-topic, and permission paths, the knowledge base (upload, search, delete, and notes that do not replace routing), alert definitions with their refusals, and the alert worker (the comparison, the fire key under a restart and a race, skipped paused definitions, one audit event per definition considered). Notification delivery has its own tests: the composed email, the fire-time recipient re-check being the one that skips a recipient (with the others still mailed), an all-blocked fire recorded as suppressed with nothing sent, three failed attempts ending in one owner notification, a duplicate tick sending nothing, and a delivery that runs with every socket function replaced so a regression is an error rather than a real connection. The Settings pages are driven through AppTest: the mail form, the encrypted store, the admin refusal, and the alert list. A known password is grepped out of the settings database, the audit database, and the rendered page. The retrieval harness, the label review gate, the note ablation, the seeded window, and the answer-cache identity have their own tests. Nothing in the suite asserts a retrieval score — the numbers above are measured by the script, so a regression shows up as a number that moved, not as a test that was quietly loosened.
+The tests cover routing, the role map, the capability gate and its refusals, the SELECT allowlist, blocked writes, CSV/HTML export, the revenue, DAU, unknown-topic, and permission paths, the knowledge base (upload, search, delete, and notes that do not replace routing), alert definitions with their refusals, and the alert worker (the comparison, the fire key under a restart and a race, skipped paused definitions, one audit event per definition considered). Notification delivery has its own tests: the composed email, the fire-time recipient re-check being the one that skips a recipient (with the others still mailed), an all-blocked fire recorded as suppressed with nothing sent, three failed attempts ending in one owner notification, a duplicate tick sending nothing, and a delivery that runs with every socket function replaced so a regression is an error rather than a real connection. The Settings pages are driven through AppTest: the mail form, the encrypted store, the admin refusal, and the alert list. Delivery health has its own tests: the four states, the streak across successes and suppressions, the reason redacted in both plain and `AUTH PLAIN` form, and an identity refusal that names both hosts, sends nothing, and is cleared by an explicit confirmation. A known password is grepped out of the settings database, the audit database, and the rendered page. The retrieval harness, the label review gate, the note ablation, the seeded window, and the answer-cache identity have their own tests. Nothing in the suite asserts a retrieval score — the numbers above are measured by the script, so a regression shows up as a number that moved, not as a test that was quietly loosened.
 
 ## Copyright
 

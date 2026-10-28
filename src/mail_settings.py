@@ -56,6 +56,7 @@ from src.crypto import (
     encrypt,
     require_key,
 )
+from src.instance_identity import record_instance_identity
 
 # The mail keys this store owns. Anything else is refused, so a caller cannot
 # turn the table into a general-purpose bag of secrets by accident.
@@ -647,6 +648,13 @@ class MailSettingsStore:
                 self._ensure_key_check(conn, key)
             elif secret_live and stored_password is not None:
                 self._refresh_hint(conn, stored_password, key)
+        # The first configuration pins who this instance is: one generated UUID,
+        # the host it was set up on, and the path of this database. A copy of
+        # the directory — on another host, or beside it — is then refused at
+        # delivery time instead of becoming a second sender of real alerts
+        # (issue #28). An identity that already exists is never re-pointed here;
+        # a move is an operator's explicit decision, not a side effect of save.
+        record_instance_identity(self.path, by=updated_by)
         return written
 
     def _ensure_key_check(self, conn: sqlite3.Connection, key: str | None) -> None:

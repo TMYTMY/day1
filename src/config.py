@@ -10,9 +10,12 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from datetime import timedelta
 from pathlib import Path
 
 from dotenv import load_dotenv
+
+from src.delivery_health import DEFAULT_ALIVE_WINDOW
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -28,6 +31,11 @@ DEFAULT_MAX_ALERT_WINDOW_DAYS = 365
 # its own. Neither is a secret, and neither is ever guessed from a password.
 DEFAULT_SMTP_PORT = 587
 DEFAULT_SMTP_FROM = "day1-alerts@localhost"
+
+# How long a delivery may go without a success before the instance calls itself
+# stale, in hours. One source of truth with ``src.delivery_health``: a daily
+# alert sends once a day, and 26 hours tolerates one late tick.
+DEFAULT_DELIVERY_ALIVE_WINDOW_HOURS = int(DEFAULT_ALIVE_WINDOW.total_seconds() // 3600)
 
 # Values of SMTP_STARTTLS that turn the upgrade off. Everything else (including
 # the empty string) leaves it on, because a mail server that offers STARTTLS
@@ -106,6 +114,22 @@ class Settings:
     # A private relay gets a CA bundle; certificate verification itself is not
     # optional, so there is no flag to turn it off.
     smtp_ca_bundle: str | None = None
+    # How long without a successful send before this instance calls itself
+    # stale. Read by the health API and by whatever renders it.
+    delivery_alive_window_hours: int = DEFAULT_DELIVERY_ALIVE_WINDOW_HOURS
+    # The host this instance reports as its own. Unset means ``socket.gethostname()``;
+    # a container with a random hostname pins a stable name here instead.
+    instance_hostname: str | None = None
+    # The operator's confirmation that this instance was moved on purpose. It is
+    # what lets a delivery proceed from a host or path the identity row does not
+    # name, and it re-binds the row. Never a default: a copy of an instance
+    # directory must not become a second sender by accident.
+    confirm_instance_move: bool = False
+
+    @property
+    def delivery_alive_window(self) -> timedelta:
+        """The stale threshold, as the duration the health API takes."""
+        return timedelta(hours=max(1, int(self.delivery_alive_window_hours)))
 
     @property
     def smtp_configured(self) -> bool:
@@ -180,6 +204,16 @@ def load_settings() -> Settings:
     if max_alert_window_days < 1:
         raise ConfigError("MAX_ALERT_WINDOW_DAYS must be at least 1 day.")
     try:
+        delivery_alive_window_hours = int(
+            os.environ.get(
+                "DELIVERY_ALIVE_WINDOW_HOURS", str(DEFAULT_DELIVERY_ALIVE_WINDOW_HOURS)
+            )
+        )
+    except ValueError as exc:
+        raise ConfigError("DELIVERY_ALIVE_WINDOW_HOURS must be an integer.") from exc
+    if delivery_alive_window_hours < 1:
+        raise ConfigError("DELIVERY_ALIVE_WINDOW_HOURS must be at least 1 hour.")
+    try:
         smtp_port = int(os.environ.get("SMTP_PORT", str(DEFAULT_SMTP_PORT)))
     except ValueError as exc:
         raise ConfigError("SMTP_PORT must be an integer.") from exc
@@ -245,4 +279,13 @@ def load_settings() -> Settings:
         smtp_starttls=smtp_starttls,
         smtp_ssl=smtp_ssl,
         smtp_ca_bundle=_optional("SMTP_CA_BUNDLE"),
+        delivery_alive_window_hours=delivery_alive_window_hours,
+        instance_hostname=_optional("DAY1_INSTANCE_HOSTNAME"),
+        # Off unless it says so, for the same reason the browser write surface
+        # is: a typo, an empty value or an unset variable must all leave the
+        # instance unable to deliver as a host it was not configured on.
+        confirm_instance_move=(
+            os.environ.get("DAY1_CONFIRM_INSTANCE_MOVE", "").strip().lower()
+            in {"1", "true", "yes", "on"}
+        ),
     )

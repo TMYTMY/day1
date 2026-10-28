@@ -9,15 +9,35 @@ This module does not decide where a secret is kept. It only encrypts and
 decrypts. A missing key refuses to encrypt. A key that cannot decrypt a stored
 value raises :class:`SecretKeyError` naming the field; callers must not treat
 that as an empty secret and read the value from somewhere else.
+
+The settings database also stores one **key-check** value: a fixed string
+encrypted under the same key. It exists so a wrong or rotated key is found once,
+by name, before any field is read, instead of surfacing as one decryption error
+per field and leaving a mixed-key store possible.
 """
 
 from __future__ import annotations
 
 from cryptography.fernet import Fernet, InvalidToken
 
+# The plaintext of the key-check value. Fixed, non-secret, and versioned: a
+# future format can change it and old rows will then read as "a different
+# key", which is the honest answer for a row this build cannot verify.
+KEY_CHECK_PLAINTEXT = "day1 instance settings key check v1"
+
 
 class SecretKeyError(Exception):
     """The encryption key is missing, invalid, or cannot decrypt a field."""
+
+
+class KeyCheckError(SecretKeyError):
+    """The key does not reproduce the key-check value stored beside the secrets.
+
+    Raised by the settings store, which owns the stored row. It is a
+    :class:`SecretKeyError` because every caller that already refuses a bad key
+    refuses this one the same way: loudly, naming the field, and without
+    reading the value from anywhere else.
+    """
 
 
 def generate_key() -> str:

@@ -145,7 +145,10 @@ def test_an_empty_password_keeps_the_stored_one_and_clear_removes_it(monkeypatch
     at.text_input(key="mail_password").set_value(SECRET)
     at = at.button(key="mail_save").click().run(timeout=60)
 
-    at.text_input(key="mail_port").set_value("2525")
+    # The from-address is not part of the transport the password was entered
+    # for, so a blank password box keeps it. Editing the port instead is
+    # refused: that is the binding, and it has its own test.
+    at.text_input(key="mail_from").set_value("alerts@example.com")
     assert at.text_input(key="mail_password").value in ("", None)
     at = at.button(key="mail_save").click().run(timeout=60)
 
@@ -155,7 +158,8 @@ def test_an_empty_password_keeps_the_stored_one_and_clear_removes_it(monkeypatch
     store = MailSettingsStore(load_settings().settings_path)
     resolved = store.resolve(load_settings())
     assert resolved["smtp_password"].value == SECRET
-    assert resolved["smtp_port"].value == "2525"
+    assert resolved["smtp_port"].value == "587"
+    assert resolved["smtp_from"].value == "alerts@example.com"
     assert "smtp_password" not in _events(tmp_path / "audit.db")[-1]["question"]
 
     at = at.button(key="mail_clear").click().run(timeout=60)
@@ -258,13 +262,17 @@ def test_a_known_password_never_appears_in_the_store_the_audit_log_or_the_page(m
 
     assert SECRET.encode() not in _raw(tmp_path / "instance.db")
     assert SECRET.encode() not in _raw(tmp_path / "audit.db")
-    assert b"9912" in _raw(tmp_path / "instance.db")
+    # The hint names the fact and the length, never the characters: this used
+    # to assert the last four were in the file, which is the leak.
+    assert b"9912" not in _raw(tmp_path / "instance.db")
+    assert b"set, 21 characters" in _raw(tmp_path / "instance.db")
 
     again = _open_mail(monkeypatch, tmp_path, "owner", DAY1_SECRET_KEY=key)
     assert again.text_input(key="mail_password").value in ("", None)
     rendered = _blob(again)
     assert SECRET not in rendered
-    assert "9912" in rendered
+    assert "9912" not in rendered
+    assert "set, 21 characters" in rendered
     assert "source: database" in rendered
 
 

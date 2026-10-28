@@ -303,3 +303,107 @@ def test_check_reads_the_settings_database_before_the_environment(tmp_path, monk
     assert "SMTP_HOST is not set" not in out
     assert "Nothing is listening" in out
 
+
+
+# --- --init-key never orphans a stored secret ------------------------------
+
+STORED_SECRET = "day1-mail-secret-9912"
+
+
+def test_init_key_refuses_when_the_settings_database_holds_ciphertext(
+    tmp_path, monkeypatch, capsys
+):
+    """Mutation: minting a key anyway orphans every stored secret in one command."""
+    from src.crypto import generate_key
+    from src.mail_settings import MailSettingsStore
+
+    key = generate_key()
+    database = tmp_path / "instance.db"
+    MailSettingsStore(database).save(
+        {"smtp_host": "db.example", "smtp_password": STORED_SECRET},
+        updated_by="owner",
+        key=key,
+    )
+    env = tmp_path / ".env"
+    env.write_text("SMTP_HOST=keep\n", encoding="utf-8")
+    monkeypatch.setattr("src.mail_setup.ENV_FILE", env)
+    monkeypatch.setenv("SETTINGS_PATH", str(database))
+
+    code = main(["--init-key"])
+    captured = capsys.readouterr()
+
+    assert code == EXIT_FAILED
+    assert "DAY1_SECRET_KEY" in captured.err
+    assert str(database) in captured.err
+    assert "smtp_password" in captured.err
+    assert "Restore the key" in captured.err
+    assert "Clear stored mail settings" in captured.err
+    assert STORED_SECRET not in captured.err
+    # Nothing was minted, and no other line moved.
+    assert env.read_text(encoding="utf-8") == "SMTP_HOST=keep\n"
+    assert "DAY1_SECRET_KEY" not in env.read_text(encoding="utf-8")
+
+
+def test_init_key_refuses_in_the_function_too(tmp_path):
+    from src.crypto import SecretKeyError, generate_key
+    from src.mail_settings import MailSettingsStore
+    from src.mail_setup import init_secret_key
+
+    key = generate_key()
+    database = tmp_path / "instance.db"
+    MailSettingsStore(database).save(
+        {"smtp_password": STORED_SECRET}, updated_by="owner", key=key
+    )
+    env = tmp_path / ".env"
+
+    with pytest.raises(SecretKeyError, match="orphan"):
+        init_secret_key(env, settings_path=database)
+
+    assert not env.exists()
+
+
+def test_init_key_mints_after_the_stored_settings_are_cleared(tmp_path, monkeypatch, capsys):
+    """The recovery step the refusal names has to actually work."""
+    from src.crypto import generate_key
+    from src.mail_settings import MailSettingsStore
+
+    key = generate_key()
+    database = tmp_path / "instance.db"
+    MailSettingsStore(database).save(
+        {"smtp_password": STORED_SECRET}, updated_by="owner", key=key
+    )
+    MailSettingsStore(database).clear(cleared_by="owner")
+    env = tmp_path / ".env"
+    monkeypatch.setattr("src.mail_setup.ENV_FILE", env)
+    monkeypatch.setenv("SETTINGS_PATH", str(database))
+
+    assert main(["--init-key"]) == EXIT_OK
+    assert "DAY1_SECRET_KEY=" in env.read_text(encoding="utf-8")
+
+
+def test_a_failed_check_does_not_print_the_password(monkeypatch):
+    """Mutation: printing the raw exception puts the AUTH line on the terminal."""
+    import base64
+
+    password = "day1-mail-secret-9912"
+    token = base64.b64encode(b"\0day1\0" + password.encode()).decode("ascii")
+
+    def failing(self, message):
+        raise OSError(f"535 AUTH PLAIN {token} rejected")
+
+    monkeypatch.setattr("src.notify.SmtpSender.send", failing)
+    settings = replace(
+        load_settings(),
+        smtp_host="127.0.0.1",
+        smtp_port=587,
+        smtp_user="day1",
+        smtp_password=password,
+        smtp_from="a@b.test",
+    )
+
+    result = verify(settings, "someone@example.test", timeout=2)
+
+    assert result.ok is False
+    assert password not in result.detail
+    assert token not in result.detail
+    assert "[redacted]" in result.detail

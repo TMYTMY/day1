@@ -559,3 +559,101 @@ def test_an_internal_ca_is_used_instead_of_disabling_verification(monkeypatch, t
     context = ssl.create_default_context(cafile=sender.ca_bundle)
     assert seen["cafile"] == str(ca)
     assert context.verify_mode == ssl.CERT_REQUIRED
+
+
+# --- the transport's own words, minus the credential -----------------------
+
+
+def test_a_header_value_with_a_line_break_is_refused():
+    """Mutation: handing the raw value to EmailMessage lets a value write a header."""
+    sender = SmtpSender(host="mail.example.com", port=587, sender="a@b.test")
+
+    with pytest.raises(ConfigError, match="Subject"):
+        sender.message_for(
+            MailMessage(to=("x@y.test",), subject="fired\nBcc: e@example.test", body="b")
+        )
+    with pytest.raises(ConfigError, match="From"):
+        SmtpSender(host="h", sender="a@b.test\nBcc: e@example.test").message_for(
+            MailMessage(to=("x@y.test",), subject="s", body="b")
+        )
+    with pytest.raises(ConfigError, match="To"):
+        sender.message_for(
+            MailMessage(to=("x@y.test\r\nBcc: e@example.test",), subject="s", body="b")
+        )
+
+
+def _auth_plain_token(user: str, password: str) -> str:
+    import base64
+
+    return base64.b64encode(b"\0" + user.encode() + b"\0" + password.encode()).decode("ascii")
+
+
+def test_the_sender_redacts_the_auth_line_before_it_re_raises(monkeypatch):
+    """Mutation: re-raising the raw reply puts the credential in the audit text."""
+    token = _auth_plain_token("owner@example.com", "day1-mail-secret-9912")
+
+    class EchoingSmtp:
+        def __init__(self, host, port, timeout=None):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def starttls(self, *, context=None):
+            pass
+
+        def login(self, user, password):
+            raise smtplib.SMTPAuthenticationError(535, f"AUTH PLAIN {token}".encode())
+
+        def send_message(self, mail):  # pragma: no cover - login fails first
+            pass
+
+    monkeypatch.setattr(smtplib, "SMTP", EchoingSmtp)
+    sender = SmtpSender(
+        host="smtp.example.test",
+        port=587,
+        sender="a@b.test",
+        user="owner@example.com",
+        password="day1-mail-secret-9912",
+        starttls=True,
+    )
+
+    with pytest.raises(smtplib.SMTPAuthenticationError) as caught:
+        sender.send(MailMessage(to=("x@y.test",), subject="s", body="b"))
+
+    # Same class, same code, no credential.
+    assert caught.value.smtp_code == 535
+    assert token not in str(caught.value)
+    assert "day1-mail-secret-9912" not in str(caught.value)
+    assert "[redacted]" in str(caught.value)
+
+
+def test_a_delivery_failure_reaches_no_audit_text_with_the_password(tmp_path):
+    """The notifier's error string is what the audit row and the owner email carry."""
+    users = tmp_path / "users.yaml"
+    users.write_text(_USERS, encoding="utf-8")
+    password = "day1-mail-secret-9912"
+    token = _auth_plain_token("alex", password)
+
+    class EchoingSender(SmtpSender):
+        def send(self, message):
+            raise smtplib.SMTPAuthenticationError(535, f"AUTH PLAIN {token}".encode())
+
+    sender = EchoingSender(
+        host="smtp.example.test", port=587, sender="a@b.test", user="alex", password=password
+    )
+    notifier = Notifier(sender=sender, users_path=users, sleep=lambda seconds: None)
+
+    delivery = notifier.deliver(_outcome(), METRIC)
+
+    assert delivery.status == DELIVERY_FAILED
+    assert delivery.error
+    assert password not in delivery.error
+    assert token not in delivery.error
+    assert "[redacted]" in delivery.error
+    assert password not in delivery.message
+    assert password not in (delivery.owner_error or "")
+    assert token not in (delivery.owner_error or "")

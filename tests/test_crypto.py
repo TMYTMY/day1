@@ -50,3 +50,11 @@ def test_a_key_that_is_not_fernet_refuses_to_save():
         require_key("not-a-fernet-key")
     with pytest.raises(SecretKeyError, match="smtp_password"):
         decrypt("gAAA", "not-a-fernet-key", field="smtp_password")
+
+
+def test_the_key_check_error_is_a_secret_key_error():
+    """Every caller that refuses a bad key refuses a key-check mismatch the same way."""
+    from src.crypto import KeyCheckError
+
+    assert issubclass(KeyCheckError, SecretKeyError)
+    assert issubclass(KeyCheckError, Exception)

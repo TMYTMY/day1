@@ -11,7 +11,9 @@ first and this file second, which is the same order the worker uses.
 
 Nothing here sends mail at alert time. The delivery path is
 :class:`src.notify.SmtpSender`. ``--init-key`` writes ``DAY1_SECRET_KEY`` when
-the file does not already hold one, and does not rewrite any other line.
+the file does not already hold one, does not rewrite any other line, and
+refuses when the settings database already holds ciphertext: a key minted on
+top of stored secrets can never read them.
 """
 
 from __future__ import annotations
@@ -30,8 +32,9 @@ from pathlib import Path
 
 from src.config import ROOT, ConfigError, Settings, load_settings
 from src.crypto import SecretKeyError, generate_key
-from src.mail_settings import resolve_mail_settings
+from src.mail_settings import resolve_mail_settings, stored_ciphertext_fields
 from src.notify import MailMessage, SmtpSender
+from src.redaction import redact_mail_error
 
 EXIT_OK = 0
 EXIT_FAILED = 1
@@ -161,7 +164,12 @@ def verify(settings: Settings, to: str, *, timeout: float = 30.0) -> CheckResult
     except smtplib.SMTPAuthenticationError as exc:
         return CheckResult(False, f"The server refused the login (code {exc.smtp_code}).", _hint_for(exc))
     except Exception as exc:  # noqa: BLE001 - every failure has to be explained, not raised
-        return CheckResult(False, f"{type(exc).__name__}: {exc}".strip(), _hint_for(exc))
+        detail = redact_mail_error(
+            f"{type(exc).__name__}: {exc}".strip(),
+            password=settings.smtp_password,
+            user=settings.smtp_user,
+        )
+        return CheckResult(False, detail, _hint_for(exc))
     return CheckResult(True, f"Delivered to {to} through {settings.smtp_host}:{settings.smtp_port}.")
 
 
@@ -190,12 +198,28 @@ def write_env(values: dict[str, str], path: Path = ENV_FILE) -> Path:
     return path
 
 
-def init_secret_key(path: Path = ENV_FILE) -> bool:
+def settings_database(path: Path | None = None) -> Path:
+    """The instance settings database, resolved the way ``load_settings`` resolves it."""
+    if path is not None:
+        return Path(path)
+    try:
+        return load_settings().settings_path
+    except ConfigError:  # pragma: no cover - a broken env still has a default store
+        return ROOT / "data" / "instance.db"
+
+
+def init_secret_key(path: Path = ENV_FILE, *, settings_path: Path | None = None) -> bool:
     """Create ``DAY1_SECRET_KEY`` when the file does not already hold one.
 
     Returns True when a key was written. A line that already has a value is
     left untouched, including its mode. An empty assignment is filled in place.
     Every other line stays as it was. A file this function writes is mode 600.
+
+    It refuses outright when the settings database already holds ciphertext.
+    A key minted on top of stored secrets cannot read them: ``data/`` restored
+    without ``.env`` would silently orphan every value, and nothing would say
+    so until the next alert failed to authenticate. Naming the recovery step is
+    the whole point of the refusal, so the message names both of them.
     """
     existing = path.read_text(encoding="utf-8") if path.exists() else ""
     lines = existing.splitlines()
@@ -204,6 +228,19 @@ def init_secret_key(path: Path = ENV_FILE) -> bool:
         name, sep, value = body.partition("=")
         if name.strip() == SECRET_KEY_NAME and sep and value.strip():
             return False
+    database = settings_database(settings_path)
+    stored = stored_ciphertext_fields(database)
+    if stored:
+        raise SecretKeyError(
+            f"Refusing to create {SECRET_KEY_NAME}: {database} already holds an encrypted "
+            f"{', '.join(stored)}. A new key cannot read it, so creating one here would "
+            "orphan the stored secret in place. Restore the key that wrote it (the .env of "
+            "the instance this data came from, or your secret manager) and run "
+            f"python -m src.mail_setup --check --to you@example.com to confirm it reads. "
+            "If that key is lost, clear the stored mail settings first — Settings, Mail "
+            "settings, 'Clear stored mail settings', which needs no key — then run "
+            "--init-key and enter the mail password again."
+        )
     key = generate_key()
     replaced = False
     new_lines: list[str] = []
@@ -314,7 +351,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     if args.init_key:
-        created = init_secret_key(ENV_FILE)
+        try:
+            created = init_secret_key(ENV_FILE)
+        except SecretKeyError as exc:
+            print(str(exc), file=sys.stderr)
+            return EXIT_FAILED
         if created:
             print(f"Wrote {SECRET_KEY_NAME} to {ENV_FILE} (mode 600).")
         else:

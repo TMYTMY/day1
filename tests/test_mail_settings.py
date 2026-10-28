@@ -13,6 +13,7 @@ from src.mail_settings import (
     SOURCE_ENV,
     SOURCE_UNCONFIGURED,
     MailSettingsStore,
+    password_hint,
     resolve_mail_settings,
 )
 
@@ -93,8 +94,13 @@ def test_save_read_and_clear_round_trip_the_secret(tmp_path):
     assert resolved["smtp_host"].source == SOURCE_DATABASE
     assert resolved["smtp_port"].value == "587"
     assert resolved["smtp_password"].value == SECRET
-    assert resolved["smtp_password"].hint == "9912"
-    assert resolved["smtp_password"].display == "9912"
+    # The hint says only that a secret is set and how long it is: no character
+    # of it, and nothing that would cut its entropy on a page.
+    assert resolved["smtp_password"].hint == password_hint(SECRET) == "set, 21 characters"
+    assert "9912" not in resolved["smtp_password"].hint
+    assert resolved["smtp_password"].display == "set, 21 characters"
+    assert resolved["smtp_password"].updated_by == "owner"
+    assert resolved["smtp_password"].cleared is False
     assert resolved["smtp_password"].source == SOURCE_DATABASE
     # The env host and port lose to the database. The password was never in .env.
     assert resolved["smtp_host"].value != "env.example"
@@ -111,9 +117,19 @@ def test_save_read_and_clear_round_trip_the_secret(tmp_path):
     assert after["smtp_port"].value == "2525"
     assert after["smtp_password"].source == SOURCE_UNCONFIGURED
     assert after["smtp_password"].value is None
+    # The credential is gone and stays gone: the tombstone says so.
+    assert after["smtp_password"].cleared is True
+    assert after.cleared is True
 
 
-def test_resolution_order_is_database_then_env_then_unconfigured(tmp_path):
+def test_resolution_takes_the_whole_transport_from_one_source(tmp_path):
+    """One source, not one source per field.
+
+    An earlier build answered each field separately, so a stored password could
+    be delivered beside a host that only existed in ``.env``. A stored value now
+    makes the database the source of every field; a field it does not hold is
+    unconfigured rather than borrowed from ``.env``.
+    """
     key = generate_key()
     bare = _settings(tmp_path)
     store = MailSettingsStore(bare.settings_path)
@@ -122,8 +138,11 @@ def test_resolution_order_is_database_then_env_then_unconfigured(tmp_path):
     assert unconfigured["smtp_password"].source == SOURCE_UNCONFIGURED
     # A default port is not a configured transport.
     assert unconfigured["smtp_port"].source == SOURCE_UNCONFIGURED
+    assert unconfigured.transport_source == SOURCE_UNCONFIGURED
 
     from_env = store.resolve(_settings(tmp_path, smtp_host="env.example", smtp_user="a@b.c"))
+    assert from_env.transport_source == SOURCE_ENV
+    assert {field.source for field in from_env.fields.values() if field.value} == {SOURCE_ENV}
     assert from_env["smtp_host"].source == SOURCE_ENV
     assert from_env["smtp_user"].value == "a@b.c"
     assert from_env["smtp_provider"].source == SOURCE_UNCONFIGURED
@@ -133,16 +152,27 @@ def test_resolution_order_is_database_then_env_then_unconfigured(tmp_path):
         updated_by="owner",
         key=key,
     )
-    mixed = store.resolve(
+    stored = store.resolve(
         _settings(tmp_path, secret_key=key, smtp_host="env.example", smtp_user="a@b.c")
     )
-    assert mixed["smtp_host"].source == SOURCE_DATABASE
-    assert mixed["smtp_host"].value == "db.example"
-    assert mixed["smtp_user"].source == SOURCE_ENV
-    assert mixed["smtp_password"].source == SOURCE_DATABASE
+    assert stored.transport_source == SOURCE_DATABASE
+    assert stored["smtp_host"].source == SOURCE_DATABASE
+    assert stored["smtp_host"].value == "db.example"
+    # The database holds no username, and the environment's is not borrowed.
+    assert stored["smtp_user"].source == SOURCE_UNCONFIGURED
+    assert stored["smtp_user"].value is None
+    assert stored["smtp_port"].source == SOURCE_UNCONFIGURED
+    assert stored["smtp_password"].source == SOURCE_DATABASE
+    assert stored["smtp_password"].value == SECRET
 
 
 def test_an_empty_password_keeps_the_stored_one(tmp_path):
+    """An empty password keeps the secret while the bound transport is untouched.
+
+    The second save edits the from-address, which is not part of the binding.
+    A save that edits a bound field instead is refused, and that is its own
+    test (``test_the_binding`` in ``tests/test_mail_secret_binding.py``).
+    """
     key = generate_key()
     settings = _settings(tmp_path, secret_key=key)
     store = MailSettingsStore(settings.settings_path)
@@ -152,18 +182,23 @@ def test_an_empty_password_keeps_the_stored_one(tmp_path):
         key=key,
     )
     written = store.save(
-        {"smtp_host": "db.example", "smtp_port": "2525", "smtp_password": ""},
+        {"smtp_host": "db.example", "smtp_from": "alerts@example.com", "smtp_password": ""},
         updated_by="owner",
         key=key,
     )
     assert "smtp_password" not in written
     resolved = store.resolve(settings)
     assert resolved["smtp_password"].value == SECRET
-    assert resolved["smtp_port"].value == "2525"
+    assert resolved["smtp_port"].value == "587"
+    assert resolved["smtp_from"].value == "alerts@example.com"
 
 
 def test_a_saved_password_is_not_in_the_database_bytes(tmp_path):
-    """Mutation: storing the password as plaintext turns this test red."""
+    """Mutation: storing the password as plaintext turns this test red.
+
+    So does writing any character of it into the hint: the last four used to be
+    there, and that is an entropy cut on a page, not a hint.
+    """
     key = generate_key()
     settings = _settings(tmp_path, secret_key=key)
     store = MailSettingsStore(settings.settings_path)
@@ -174,7 +209,9 @@ def test_a_saved_password_is_not_in_the_database_bytes(tmp_path):
     )
     blob = _bytes(settings.settings_path)
     assert SECRET.encode() not in blob
-    assert b"9912" in blob
+    assert b"9912" not in blob
+    assert b"day1-mail-secret" not in blob
+    assert b"set, 21 characters" in blob
     row_value = store._rows()["smtp_password"]["value"]
     assert row_value != SECRET
     assert SECRET not in row_value
@@ -240,12 +277,24 @@ def test_a_missing_key_cannot_decrypt_a_stored_password(tmp_path):
 
 
 def test_a_stored_port_that_is_not_a_port_names_the_field(tmp_path):
+    """A hand-edited row is refused by name on the read path.
+
+    The store will not write a port that is not a port (that has its own
+    test), so this plants the row with sqlite3: a database restored from
+    somewhere else, or edited by hand, still has to be answered for.
+    """
+    import sqlite3
+
+    from src.config import ConfigError
+
     key = generate_key()
     settings = _settings(tmp_path, secret_key=key, smtp_host="env.example")
-    MailSettingsStore(settings.settings_path).save(
-        {"smtp_port": "nope"}, updated_by="owner", key=key
-    )
-    from src.config import ConfigError
+    store = MailSettingsStore(settings.settings_path)
+    store.save({"smtp_port": "587"}, updated_by="owner", key=key)
+    conn = sqlite3.connect(settings.settings_path)
+    with conn:
+        conn.execute("UPDATE instance_settings SET value = 'nope' WHERE key = 'smtp_port'")
+    conn.close()
 
     with pytest.raises(ConfigError, match="smtp_port"):
         resolve_mail_settings(settings)

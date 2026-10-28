@@ -48,6 +48,21 @@ def _allowed_topics(catalog: Catalog, allowed: set[str]) -> list[str]:
     return titles
 
 
+def _table_titles(catalog: Catalog) -> dict[str, str]:
+    """Map each warehouse table to the topic title a person knows it by.
+
+    Refusals use these names instead of table ids, so a business user reads
+    "Daily active users is outside the finance role" rather than "Table dau".
+    A table no topic claims is simply absent, which keeps the explicit
+    "Table ..." wording for it.
+    """
+    titles: dict[str, str] = {}
+    for topic in catalog.topics:
+        for table in topic.tables:
+            titles.setdefault(table, topic.title)
+    return titles
+
+
 def _examples(allowed: set[str]) -> str:
     examples = []
     if "revenue" in allowed:
@@ -401,7 +416,7 @@ def answer_question(
     if not route.matched:
         return finish(Answer(status="clarify", message=_clarify(catalog, allowed)))
 
-    decision = authorize(user, CAPABILITY_QUERY, route.tables)
+    decision = authorize(user, CAPABILITY_QUERY, route.tables, display=_table_titles(catalog))
     denied = list(decision.tables)
     permitted = [table for table in route.tables if table not in denied]
     if not permitted:

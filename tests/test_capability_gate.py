@@ -213,7 +213,8 @@ def test_a_table_refusal_writes_one_row_and_names_table_and_role(env):
     answer = _ask(env, env.finance, "Show daily active users by platform", llm=_Boom())
     assert answer.status == "denied"
     assert answer.sql is None
-    assert "dau" in answer.message
+    # The refusal names the topic a person knows, not the warehouse table id.
+    assert "Daily active users" in answer.message
     assert "finance" in answer.message
     assert "outside the finance role" in answer.message
 
@@ -259,9 +260,9 @@ def test_the_gate_runs_before_sql_is_generated(env, monkeypatch):
     real_authorize = pipeline.authorize
     real_plan = pipeline.plan_sql
 
-    def spy_authorize(user, capability, tables=()):
+    def spy_authorize(user, capability, tables=(), **kwargs):
         order.append("authorize")
-        return real_authorize(user, capability, tables)
+        return real_authorize(user, capability, tables, **kwargs)
 
     def spy_plan(*args, **kwargs):
         order.append("plan_sql")
@@ -341,3 +342,14 @@ def test_a_legacy_audit_database_gains_the_new_columns(tmp_path):
     assert len(rows) == 2
     assert rows[1]["event_type"] == "question"
     assert rows[1]["capability"] == "query"
+
+
+def test_a_refusal_names_the_topic_when_one_is_known():
+    """A business user must never be handed a warehouse table id."""
+    user = User("g", "growth", ("dau",))
+    friendly = authorize(user, QUERY, ("revenue",), display={"revenue": "Revenue"})
+    assert friendly.allowed is False
+    assert friendly.message == "Revenue is outside the growth role."
+
+    bare = authorize(user, QUERY, ("revenue",))
+    assert bare.message == "Table revenue is outside the growth role."

@@ -18,7 +18,7 @@ grant is checked first: a role without the grant learns nothing about tables.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
 from src.models import User
@@ -64,13 +64,25 @@ class Decision:
         return self.allowed
 
 
-def authorize(user: User, capability: str, tables: Iterable[str] = ()) -> Decision:
+def authorize(
+    user: User,
+    capability: str,
+    tables: Iterable[str] = (),
+    display: Mapping[str, str] | None = None,
+) -> Decision:
     """Decide one capability run for one user.
 
     Both grants must pass. A capability refusal names the capability and the
     role; a table refusal names the tables and the role. Callers pass the whole
     set of tables the action would read and read ``decision.tables`` to learn
     which ones were refused.
+
+    ``display`` maps a table to the name a person knows it by (its topic title).
+    When every refused table has one, the refusal reads the way it did before
+    capabilities existed — "Daily active users is outside the finance role" —
+    because a business user should not be handed a warehouse table id. Tables
+    with no friendly name keep the explicit "Table ..." wording, so the two
+    cases stay distinguishable.
     """
     if capability not in KNOWN_CAPABILITIES:
         raise ValueError(f"Unknown capability: {capability}")
@@ -86,14 +98,20 @@ def authorize(user: User, capability: str, tables: Iterable[str] = ()) -> Decisi
     allowed_tables = set(user.allowed_tables)
     refused = tuple(dict.fromkeys(table for table in tables if table not in allowed_tables))
     if refused:
-        noun = "Table" if len(refused) == 1 else "Tables"
         verb = "is" if len(refused) == 1 else "are"
+        friendly = display is not None and all(table in display for table in refused)
+        if friendly:
+            names = [display[table] for table in refused]  # type: ignore[index]
+            noun = ""
+        else:
+            names = list(refused)
+            noun = "Table " if len(refused) == 1 else "Tables "
         return Decision(
             allowed=False,
             capability=capability,
             reason=TABLE_NOT_ALLOWED,
             tables=refused,
-            message=f"{noun} {join_names(list(refused))} {verb} outside the {user.role} role.",
+            message=f"{noun}{join_names(names)} {verb} outside the {user.role} role.",
         )
 
     return Decision(allowed=True, capability=capability)

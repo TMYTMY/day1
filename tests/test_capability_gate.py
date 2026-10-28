@@ -66,6 +66,45 @@ def _write_users(tmp_path, body: str):
 # --- configuration: capability grants are additive -------------------------
 
 
+def test_the_owner_role_holds_admin_and_reads_no_tables():
+    """The demo owner can reach Settings. Administering is not reading data."""
+    from src.capabilities import ADMIN
+
+    directory = load_directory(USERS)
+    assert directory.roles["owner"] == ()
+    assert directory.capabilities["owner"] == (ADMIN,)
+    owner = authenticate("owner", "owner", USERS)
+    assert owner is not None
+    assert owner.allowed_tables == ()
+    assert owner.capabilities == (ADMIN,)
+    assert authorize(owner, ADMIN).allowed is True
+    analyst = authenticate("analyst", "analyst", USERS)
+    assert analyst is not None
+    refused = authorize(analyst, ADMIN)
+    assert refused.allowed is False
+    assert refused.message == "The admin capability is not granted to the analyst role."
+
+
+def test_an_empty_table_list_is_a_role_that_reads_nothing(tmp_path):
+    path = _write_users(
+        tmp_path,
+        """
+roles:
+  owner:
+    tables: []
+    capabilities: [admin]
+users:
+  - username: owner
+    password: owner
+    role: owner
+""",
+    )
+    directory = load_directory(path)
+    assert directory.roles["owner"] == ()
+    user = authenticate("owner", "owner", path)
+    assert user is not None and user.allowed_tables == ()
+
+
 def test_every_role_carries_the_query_capability():
     directory = load_directory(USERS)
     for role in ("analyst", "finance", "growth"):
@@ -83,6 +122,7 @@ def test_capability_grants_do_not_change_the_existing_table_grants():
         "analyst": ("revenue", "dau"),
         "finance": ("revenue",),
         "growth": ("dau",),
+        "owner": (),
     }
 
 

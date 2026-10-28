@@ -62,7 +62,9 @@ from src.alerts import CONFIRMED, PAUSED, AlertDefinition, AlertService
 from src.audit import AuditLog
 from src.auth import user_named
 from src.capabilities import ALERT, authorize
-from src.config import Settings, load_settings
+from src.config import ConfigError, Settings, load_settings
+from src.crypto import SecretKeyError
+from src.mail_settings import resolve_mail_settings
 from src.db.factory import build_adapter
 from src.fires import FireStore
 from src.metrics import Metric, definition_hash, measure_column
@@ -332,11 +334,15 @@ class Worker:
         """Build the worker the way a deployment does: everything from settings.
 
         ``sender`` overrides the transport the settings describe, which is what
-        a test injects. Without an override the sender comes from ``SMTP_*``;
-        when those are unset there is no sender, and the notifier reports that
-        rather than pretending a notification was sent. ``sleep`` is the pause
-        between delivery attempts, injected so no test waits.
+        a test injects. Without an override the sender comes from the one mail
+        store: the encrypted settings database, then ``SMTP_*``. When neither
+        names a host there is no sender, and the notifier reports that rather
+        than pretending a notification was sent. A stored secret that cannot
+        be decrypted raises; it is not replaced with the environment password.
+        ``sleep`` is the pause between delivery attempts, injected so no test
+        waits.
         """
+        settings = resolve_mail_settings(settings)
         log = audit if audit is not None else AuditLog(settings.audit_path)
         routes = catalog if catalog is not None else load_catalog(settings.routing_path)
         titles = _topic_titles(routes)
@@ -856,9 +862,11 @@ def main(argv: list[str] | None = None, *, sender: MailSender | None = None) -> 
     A tick is cheap when nothing is due, and a repeated tick is harmless: the
     fire key makes a second evaluation of the same window impossible.
 
-    The sender comes from ``SMTP_HOST`` (and the other ``SMTP_*`` settings). When
-    those are unset the command refuses to run rather than tick and deliver
-    nothing. ``sender`` overrides it, which is how a test drives the whole
+    The sender comes from the instance mail store: encrypted database, then
+    ``SMTP_*``. When neither names a host the command refuses to run rather
+    than tick and deliver nothing. A key that cannot decrypt a stored password
+    is the same kind of refusal: loud, and not a fallback to ``.env``.
+    ``sender`` overrides the transport, which is how a test drives the whole
     command without a mail server.
     """
     parser = argparse.ArgumentParser(
@@ -882,6 +890,11 @@ def main(argv: list[str] | None = None, *, sender: MailSender | None = None) -> 
         parser.error("--interval must be at least 1 second")
 
     settings = load_settings()
+    try:
+        settings = resolve_mail_settings(settings)
+    except (SecretKeyError, ConfigError) as exc:
+        print(f"refused: {exc}", file=sys.stderr)
+        return EXIT_UNCONFIGURED
     audit = AuditLog(settings.audit_path)
     transport = sender if sender is not None else build_sender(settings)
     if transport is None:

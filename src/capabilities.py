@@ -29,7 +29,10 @@ QUERY = "query"
 # The capability that drafts and confirms an alert definition, and that its
 # recipients must hold for a notification to reach them.
 ALERT = "alert"
-KNOWN_CAPABILITIES = frozenset({QUERY, ALERT})
+# The capability that configures the instance: mail settings and the alert
+# list. It is not a grant to read warehouse tables.
+ADMIN = "admin"
+KNOWN_CAPABILITIES = frozenset({QUERY, ALERT, ADMIN})
 
 # Reasons a decision can be refused. They are also what the audit row records
 # in its error column, so keep them stable.

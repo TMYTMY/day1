@@ -237,3 +237,69 @@ def test_check_mode_reports_a_failure_without_prompting(monkeypatch, capsys):
     assert code == EXIT_FAILED
     assert "FAILED:" in out
     assert "How to fix:" in out
+
+
+def test_init_key_writes_a_key_without_touching_other_lines(tmp_path, monkeypatch, capsys):
+    env = tmp_path / ".env"
+    env.write_text("# keep\nSMTP_HOST=keep\nOTHER=1\n")
+    monkeypatch.setattr("src.mail_setup.ENV_FILE", env)
+    assert main(["--init-key"]) == EXIT_OK
+    text = env.read_text()
+    assert "# keep" in text
+    assert "SMTP_HOST=keep" in text
+    assert "OTHER=1" in text
+    key_line = next(line for line in text.splitlines() if line.startswith("DAY1_SECRET_KEY="))
+    key = key_line.split("=", 1)[1]
+    from cryptography.fernet import Fernet
+
+    Fernet(key.encode("ascii"))  # it is a real key, not a placeholder
+    assert stat.S_IMODE(env.stat().st_mode) == 0o600
+
+    env.chmod(0o644)
+    before = env.read_text()
+    assert main(["--init-key"]) == EXIT_OK
+    assert env.read_text() == before
+    assert stat.S_IMODE(env.stat().st_mode) == 0o644
+    assert "already present" in capsys.readouterr().out
+
+
+def test_init_key_fills_an_empty_assignment_in_place(tmp_path, monkeypatch):
+    env = tmp_path / ".env"
+    env.write_text("DAY1_SECRET_KEY=\nSMTP_HOST=keep\n")
+    monkeypatch.setattr("src.mail_setup.ENV_FILE", env)
+    assert main(["--init-key"]) == EXIT_OK
+    lines = env.read_text().splitlines()
+    assert lines[1] == "SMTP_HOST=keep"
+    assert sum(line.startswith("DAY1_SECRET_KEY=") for line in lines) == 1
+    assert lines[0] != "DAY1_SECRET_KEY="
+    assert stat.S_IMODE(env.stat().st_mode) == 0o600
+
+
+def test_check_reads_the_settings_database_before_the_environment(tmp_path, monkeypatch, capsys):
+    from src.crypto import generate_key
+    from src.mail_settings import MailSettingsStore
+
+    key = generate_key()
+    database = tmp_path / "instance.db"
+    MailSettingsStore(database).save(
+        {
+            "smtp_host": "127.0.0.1",
+            "smtp_port": "9",
+            "smtp_starttls": "false",
+            "smtp_ssl": "false",
+        },
+        updated_by="owner",
+        key=key,
+    )
+    monkeypatch.setenv("SETTINGS_PATH", str(database))
+    monkeypatch.setenv("DAY1_SECRET_KEY", key)
+    monkeypatch.delenv("SMTP_HOST", raising=False)
+    monkeypatch.setenv("SMTP_PORT", "587")
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "demo.db"))
+    monkeypatch.setenv("AUDIT_PATH", str(tmp_path / "audit.db"))
+    code = main(["--check", "--to", "someone@example.test"])
+    out = capsys.readouterr().out
+    assert code == EXIT_FAILED
+    assert "SMTP_HOST is not set" not in out
+    assert "Nothing is listening" in out
+

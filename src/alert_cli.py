@@ -64,6 +64,7 @@ from src.alerts import (
 from src.audit import AuditLog
 from src.auth import authenticate
 from src.config import ConfigError, Settings, load_settings
+from src.crypto import SecretKeyError
 from src.models import User
 from src.routing import load_catalog
 
@@ -501,6 +502,12 @@ def main(argv: list[str] | None = None) -> int:
         return int(args.handler(args, settings=settings, service=service))
     except CliRefusal as refusal:
         return _report(refusal)
+    except SecretKeyError as exc:
+        # run-now builds the worker, which reads the mail store. A key that
+        # cannot decrypt a stored password is a configuration error, named,
+        # and not a traceback and not a fallback to .env.
+        print(f"configuration error: {exc}", file=sys.stderr)
+        return EXIT_REFUSED
 
 
 if __name__ == "__main__":

@@ -59,7 +59,7 @@ def test_settings_path_and_secret_key_come_from_the_environment(monkeypatch, tmp
     assert settings.settings_path == tmp_path / "custom.db"
     assert settings.secret_key == "test-key"
     assert "test-key" not in repr(settings)
-    assert "secret_key=set" in repr(settings)
+    assert "fernet=set" in repr(settings)
 
 
 def test_a_relative_settings_path_stays_inside_the_instance(monkeypatch):
@@ -257,4 +257,90 @@ def test_repr_never_contains_the_secret_key_or_the_mail_password(tmp_path):
     text = repr(settings)
     assert key not in text
     assert SECRET not in text
-    assert "secret_key=set" in text
+    assert "fernet=set" in text
+
+
+def test_the_worker_and_notifier_read_the_store_not_the_environment(tmp_path):
+    from src.worker import Worker
+
+    key = generate_key()
+    settings = _settings(
+        tmp_path,
+        secret_key=key,
+        smtp_host="env.example",
+        smtp_port=2525,
+        smtp_user="env-user",
+        smtp_password=ENV_SECRET,
+        smtp_from="env@example.com",
+    )
+    MailSettingsStore(settings.settings_path).save(
+        {
+            "smtp_host": "db.example",
+            "smtp_port": "465",
+            "smtp_user": "db-user",
+            "smtp_password": SECRET,
+            "smtp_from": "db@example.com",
+            "smtp_starttls": "false",
+            "smtp_ssl": "true",
+        },
+        updated_by="owner",
+        key=key,
+    )
+    worker = Worker.from_settings(settings)
+    sender = worker.notifier.sender
+    assert sender is not None
+    assert sender.host == "db.example"
+    assert sender.port == 465
+    assert sender.user == "db-user"
+    assert sender.password == SECRET
+    assert sender.sender == "db@example.com"
+    assert sender.ssl is True
+    assert sender.starttls is False
+
+
+def test_the_worker_refuses_a_wrong_key_instead_of_using_env(tmp_path):
+    from src.worker import Worker
+
+    key = generate_key()
+    settings = _settings(
+        tmp_path,
+        secret_key=key,
+        smtp_host="env.example",
+        smtp_password=ENV_SECRET,
+    )
+    MailSettingsStore(settings.settings_path).save(
+        {"smtp_password": SECRET}, updated_by="owner", key=key
+    )
+    broken = replace(settings, secret_key=generate_key())
+    with pytest.raises(SecretKeyError, match="smtp_password") as caught:
+        Worker.from_settings(broken)
+    assert SECRET not in str(caught.value)
+    assert ENV_SECRET not in str(caught.value)
+
+
+def test_worker_main_names_a_bad_key_and_does_not_start(monkeypatch, tmp_path, capsys):
+    from src.worker import EXIT_UNCONFIGURED
+    from src.worker import main as worker_main
+
+    key = generate_key()
+    database = tmp_path / "instance.db"
+    MailSettingsStore(database).save(
+        {"smtp_host": "db.example", "smtp_password": SECRET},
+        updated_by="owner",
+        key=key,
+    )
+    monkeypatch.setenv("SETTINGS_PATH", str(database))
+    monkeypatch.setenv("DAY1_SECRET_KEY", generate_key())
+    monkeypatch.setenv("SMTP_HOST", "env.example")
+    monkeypatch.setenv("SMTP_PASSWORD", ENV_SECRET)
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "demo.db"))
+    monkeypatch.setenv("AUDIT_PATH", str(tmp_path / "audit.db"))
+    code = worker_main([])
+    captured = capsys.readouterr()
+    assert code == EXIT_UNCONFIGURED
+    assert "smtp_password" in captured.err
+    assert "refused:" in captured.err
+    assert SECRET not in captured.err
+    assert ENV_SECRET not in captured.err
+    assert captured.out == ""
+

@@ -108,12 +108,12 @@ class Settings:
         key_state = "set" if self.openrouter_api_key else "unset"
         embed_key = "set" if self.embedding_api_key else "unset"
         mail_state = "set" if self.smtp_configured else "unset"
-        secret_state = "set" if self.secret_key else "unset"
+        fernet_state = "set" if self.secret_key else "unset"
         return (
             f"Settings(db_backend={self.db_backend!r}, "
             f"model={self.openrouter_model!r}, api_key={key_state}, "
             f"embedding={self.embedding_provider!r}, embedding_key={embed_key}, "
-            f"smtp={mail_state}, secret_key={secret_state})"
+            f"smtp={mail_state}, fernet={fernet_state})"
         )
 
 

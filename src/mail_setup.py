@@ -4,11 +4,14 @@ Why this exists: everything before this point decides *what* to send, and the
 worker refuses to run without a transport. This module is how a human, once per
 instance, turns a mail provider into that transport — a preset per provider, a
 guided prompt, a written `.env`, and a real test send whose failure explains
-itself. The password is asked for, never echoed, and never stored anywhere but
-the instance's own `.env` (mode 600).
+itself. The password is asked for, never echoed, and the wizard stores it
+only in the instance's own `.env` (mode 600). The Settings page stores an
+encrypted copy in the instance database; ``--check`` resolves that database
+first and this file second, which is the same order the worker uses.
 
-Nothing here is used at alert time. The delivery path is
-:class:`src.notify.SmtpSender`; this module only produces the settings it reads.
+Nothing here sends mail at alert time. The delivery path is
+:class:`src.notify.SmtpSender`. ``--init-key`` writes ``DAY1_SECRET_KEY`` when
+the file does not already hold one, and does not rewrite any other line.
 """
 
 from __future__ import annotations
@@ -26,6 +29,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from src.config import ROOT, ConfigError, Settings, load_settings
+from src.crypto import SecretKeyError, generate_key
+from src.mail_settings import resolve_mail_settings
 from src.notify import MailMessage, SmtpSender
 
 EXIT_OK = 0
@@ -35,6 +40,7 @@ EXIT_USAGE = 2
 ENV_FILE = ROOT / ".env"
 
 COMMENT = "# SMTP transport for alert delivery (added by src.mail_setup)"
+SECRET_KEY_NAME = "DAY1_SECRET_KEY"
 
 SMTP_KEYS = (
     "SMTP_HOST",
@@ -184,6 +190,46 @@ def write_env(values: dict[str, str], path: Path = ENV_FILE) -> Path:
     return path
 
 
+def init_secret_key(path: Path = ENV_FILE) -> bool:
+    """Create ``DAY1_SECRET_KEY`` when the file does not already hold one.
+
+    Returns True when a key was written. A line that already has a value is
+    left untouched, including its mode. An empty assignment is filled in place.
+    Every other line stays as it was. A file this function writes is mode 600.
+    """
+    existing = path.read_text(encoding="utf-8") if path.exists() else ""
+    lines = existing.splitlines()
+    for line in lines:
+        body = line.split("#", 1)[0].strip()
+        name, sep, value = body.partition("=")
+        if name.strip() == SECRET_KEY_NAME and sep and value.strip():
+            return False
+    key = generate_key()
+    replaced = False
+    new_lines: list[str] = []
+    for line in lines:
+        body = line.split("#", 1)[0].strip()
+        name, sep, value = body.partition("=")
+        if name.strip() == SECRET_KEY_NAME and sep and not value.strip() and not replaced:
+            comment = ""
+            marker = line.find("#")
+            if marker != -1:
+                comment = " " + line[marker:]
+            new_lines.append(f"{SECRET_KEY_NAME}={key}{comment}")
+            replaced = True
+            continue
+        new_lines.append(line)
+    if not replaced:
+        new_lines.append(f"{SECRET_KEY_NAME}={key}")
+    text = "\n".join(new_lines)
+    if text and not text.endswith("\n"):
+        text += "\n"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    path.chmod(stat.S_IRUSR | stat.S_IWUSR)
+    return True
+
+
 def values_for(preset: Preset, *, host: str, port: int, user: str, password: str, sender: str) -> dict[str, str]:
     return {
         "SMTP_HOST": host,
@@ -258,15 +304,28 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument(
         "--check", action="store_true",
-        help="do not prompt: test the .env already in place and exit",
+        help="do not prompt: test the mail settings already in place and exit",
     )
     parser.add_argument("--to", dest="destination", default="", help="test recipient for --check")
+    parser.add_argument(
+        "--init-key", action="store_true",
+        help="create DAY1_SECRET_KEY in .env if it is absent, without changing other lines",
+    )
     args = parser.parse_args(list(argv) if argv is not None else None)
+
+    if args.init_key:
+        created = init_secret_key(ENV_FILE)
+        if created:
+            print(f"Wrote {SECRET_KEY_NAME} to {ENV_FILE} (mode 600).")
+        else:
+            print(f"{SECRET_KEY_NAME} is already present in {ENV_FILE}; left it untouched.")
+        if not args.check:
+            return EXIT_OK
 
     if args.check:
         try:
-            settings = load_settings()
-        except ConfigError as exc:
+            settings = resolve_mail_settings(load_settings())
+        except (ConfigError, SecretKeyError) as exc:
             print(f"Settings do not load: {exc}", file=sys.stderr)
             return EXIT_FAILED
         result = verify(settings, args.destination)

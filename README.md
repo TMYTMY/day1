@@ -247,6 +247,31 @@ Results wider than the preview are truncated on screen. CSV and HTML download th
 
 Each question is appended to the audit database with the user, role, capability, event type, tables, SQL, status, and row count. One writer on the audit store (`AuditLog.record_event`) builds the row, so every outcome — ok, clarify, denied, blocked, failed — writes exactly one row, and a capability that lands later writes the same shape.
 
+## Alerts: setting up the mail connection
+
+One command per instance, once:
+
+```
+python -m src.mail_setup
+```
+
+It asks which provider (Gmail, Outlook, Yahoo, QQ, 163, or your own relay), fills
+the host and port for you, asks for the username and app password, writes the
+SMTP keys into the instance's `.env` (mode 600, password never echoed), and then
+sends a real test message and tells you what the server said — including, on
+failure, whether the problem is an app password, the wrong TLS mode for the port,
+or nothing listening.
+
+Already configured? Re-test without answering questions:
+
+```
+python -m src.mail_setup --check --to you@example.com
+```
+
+Port 587 uses STARTTLS; port 465 uses implicit TLS (`SMTP_SSL=true`, which turns
+STARTTLS off). The two are alternatives, and the settings layer refuses to have
+both.
+
 ## Alerts: the worker
 
 An alert definition is data a person confirmed (`src/alerts.py`). Nothing runs it inside the web app: the worker is a separate command, one tick per invocation, so cron or systemd owns the schedule.

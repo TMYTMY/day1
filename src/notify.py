@@ -159,6 +159,7 @@ class SmtpSender:
     user: str | None = None
     password: str | None = None
     starttls: bool = True
+    ssl: bool = False
     timeout: float = 30.0
 
     @classmethod
@@ -176,6 +177,7 @@ class SmtpSender:
             user=settings.smtp_user,
             password=settings.smtp_password,
             starttls=bool(settings.smtp_starttls),
+            ssl=bool(settings.smtp_ssl),
         )
 
     def message_for(self, message: MailMessage) -> EmailMessage:
@@ -200,8 +202,11 @@ class SmtpSender:
         to do about it.
         """
         mail = self.message_for(message)
-        with smtplib.SMTP(self.host, self.port, timeout=self.timeout) as smtp:
-            if self.starttls:
+        # 465 speaks TLS from the first byte; 587 starts plain and upgrades. The
+        # settings layer guarantees the two flags are never both true.
+        factory = smtplib.SMTP_SSL if self.ssl else smtplib.SMTP
+        with factory(self.host, self.port, timeout=self.timeout) as smtp:
+            if self.starttls and not self.ssl:
                 smtp.starttls()
             if self.user:
                 smtp.login(self.user, self.password or "")

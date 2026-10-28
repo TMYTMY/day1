@@ -86,6 +86,7 @@ class Settings:
     smtp_password: str | None = None
     smtp_from: str = DEFAULT_SMTP_FROM
     smtp_starttls: bool = True
+    smtp_ssl: bool = False
 
     @property
     def smtp_configured(self) -> bool:
@@ -167,6 +168,10 @@ def load_settings() -> Settings:
     smtp_user = _optional("SMTP_USER")
     smtp_from = _optional("SMTP_FROM") or (smtp_user if smtp_user and "@" in smtp_user else None)
     smtp_starttls = os.environ.get("SMTP_STARTTLS", "").strip().lower() not in _FALSE
+    smtp_ssl = os.environ.get("SMTP_SSL", "").strip().lower() not in _FALSE
+    if smtp_ssl:
+        # implicit TLS on 465 and STARTTLS on 587 are alternatives, never both
+        smtp_starttls = False
     return Settings(
         db_backend=backend,
         db_path=_resolve(os.environ.get("DB_PATH", ""), "data/demo.db"),
@@ -207,4 +212,5 @@ def load_settings() -> Settings:
         smtp_password=_optional("SMTP_PASSWORD"),
         smtp_from=smtp_from or DEFAULT_SMTP_FROM,
         smtp_starttls=smtp_starttls,
+        smtp_ssl=smtp_ssl,
     )

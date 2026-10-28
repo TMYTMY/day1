@@ -17,6 +17,18 @@ DEFAULT_SQL_TIMEOUT_MS = 5000
 # is refused with this number in the message; it is never clamped.
 DEFAULT_MAX_ALERT_WINDOW_DAYS = 365
 
+# Notification delivery. The submission port is the conventional default; the
+# from-address is what a local relay accepts when the instance has no domain of
+# its own. Neither is a secret, and neither is ever guessed from a password.
+DEFAULT_SMTP_PORT = 587
+DEFAULT_SMTP_FROM = "day1-alerts@localhost"
+
+# Values of SMTP_STARTTLS that turn the upgrade off. Everything else (including
+# the empty string) leaves it on, because a mail server that offers STARTTLS
+# should be asked for it.
+_FALSE = frozenset({"0", "false", "no", "off"})
+
+
 
 class ConfigError(Exception):
     """The app cannot start because a config file or env value is invalid."""
@@ -65,14 +77,30 @@ class Settings:
     # rather than for one table in it.
     alerts_path: Path = field(default_factory=lambda: ROOT / "data" / "alerts.db")
     max_alert_window_days: int = DEFAULT_MAX_ALERT_WINDOW_DAYS
+    # Notification delivery (issue #21). A worker with no SMTP_HOST refuses to
+    # run rather than tick and deliver nothing, so these are not optional for a
+    # deployment that has confirmed an alert definition.
+    smtp_host: str | None = None
+    smtp_port: int = DEFAULT_SMTP_PORT
+    smtp_user: str | None = None
+    smtp_password: str | None = None
+    smtp_from: str = DEFAULT_SMTP_FROM
+    smtp_starttls: bool = True
+
+    @property
+    def smtp_configured(self) -> bool:
+        """True when this instance has a host to deliver through."""
+        return bool(self.smtp_host and self.smtp_from)
 
     def __repr__(self) -> str:
         key_state = "set" if self.openrouter_api_key else "unset"
         embed_key = "set" if self.embedding_api_key else "unset"
+        mail_state = "set" if self.smtp_configured else "unset"
         return (
             f"Settings(db_backend={self.db_backend!r}, "
             f"model={self.openrouter_model!r}, api_key={key_state}, "
-            f"embedding={self.embedding_provider!r}, embedding_key={embed_key})"
+            f"embedding={self.embedding_provider!r}, embedding_key={embed_key}, "
+            f"smtp={mail_state})"
         )
 
 
@@ -130,6 +158,15 @@ def load_settings() -> Settings:
         raise ConfigError("MAX_ALERT_WINDOW_DAYS must be an integer.") from exc
     if max_alert_window_days < 1:
         raise ConfigError("MAX_ALERT_WINDOW_DAYS must be at least 1 day.")
+    try:
+        smtp_port = int(os.environ.get("SMTP_PORT", str(DEFAULT_SMTP_PORT)))
+    except ValueError as exc:
+        raise ConfigError("SMTP_PORT must be an integer.") from exc
+    if not 1 <= smtp_port <= 65535:
+        raise ConfigError("SMTP_PORT must be a port number between 1 and 65535.")
+    smtp_user = _optional("SMTP_USER")
+    smtp_from = _optional("SMTP_FROM") or (smtp_user if smtp_user and "@" in smtp_user else None)
+    smtp_starttls = os.environ.get("SMTP_STARTTLS", "").strip().lower() not in _FALSE
     return Settings(
         db_backend=backend,
         db_path=_resolve(os.environ.get("DB_PATH", ""), "data/demo.db"),
@@ -164,4 +201,10 @@ def load_settings() -> Settings:
         sources_staging_dir=_resolve(os.environ.get("SOURCES_STAGING_DIR", ""), "data/staging"),
         alerts_path=_resolve(os.environ.get("ALERTS_PATH", ""), "data/alerts.db"),
         max_alert_window_days=max_alert_window_days,
+        smtp_host=_optional("SMTP_HOST"),
+        smtp_port=smtp_port,
+        smtp_user=smtp_user,
+        smtp_password=_optional("SMTP_PASSWORD"),
+        smtp_from=smtp_from or DEFAULT_SMTP_FROM,
+        smtp_starttls=smtp_starttls,
     )

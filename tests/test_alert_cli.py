@@ -327,12 +327,12 @@ def test_a_metric_the_actor_cannot_read_is_refused_naming_the_topic(instance, ca
     assert "field: metric" in err
 
 
-def test_a_recipient_without_the_alert_capability_is_refused_by_name(instance, capsys):
-    code, _, err = instance.run(capsys, *_draft_args(recipient="gus"))
-    assert code == 1
-    assert "The recipient gus does not hold the alert capability." in err
-    assert "field: recipient" in err
-    assert "reason: recipient_no_capability" in err
+def test_a_read_only_role_may_still_be_a_recipient(instance, capsys):
+    """finn reads revenue without holding the alert capability, and that is fine."""
+    code, out, err = instance.run(capsys, *_draft_args(recipient="finn"))
+    assert code == 0, err
+    code, out, _ = instance.run(capsys, "show", 1)
+    assert "finn" in out
 
 
 def test_a_recipient_who_cannot_read_the_metric_is_refused_by_name(instance, capsys):

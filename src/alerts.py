@@ -48,7 +48,7 @@ from src.alert_eval import (
 )
 from src.audit import AuditLog
 from src.auth import user_named
-from src.capabilities import ALERT, CAPABILITY_NOT_GRANTED, TABLE_NOT_ALLOWED, authorize
+from src.capabilities import ALERT, CAPABILITY_NOT_GRANTED, QUERY, TABLE_NOT_ALLOWED, authorize
 from src.config import Settings
 from src.metrics import Metric, definition_hash, is_placeholder, load_metrics, measure_column
 from src.models import User
@@ -928,7 +928,11 @@ class AlertService:
         return tuple(cleaned)
 
     def _check_recipients(self, recipients: object, metric: Metric) -> AlertResult | None:
-        """Every recipient must hold the alert capability and read the metric.
+        """Every recipient must be able to READ the metric.
+
+        Receiving a number is a read, so the query capability and the table
+        grant are what matter. The alert capability governs who may create or
+        confirm a definition, not who may be told about one.
 
         Being sent an alert is a way of reading the metric, so a recipient is
         held to the same two grants its owner needed. Checked here, at write
@@ -943,14 +947,14 @@ class AlertService:
                     field="recipient",
                     reason=RECIPIENT_UNKNOWN,
                 )
-            decision = authorize(recipient, ALERT, (metric.table,), display=self._titles)
+            decision = authorize(recipient, QUERY, (metric.table,), display=self._titles)
             if decision.allowed:
                 continue
             if decision.reason == CAPABILITY_NOT_GRANTED:
                 return AlertResult(
                     ok=False,
                     message=(
-                        f"The recipient {username} does not hold the alert capability."
+                        f"The recipient {username} does not hold the query capability."
                     ),
                     field="recipient",
                     reason=RECIPIENT_NO_CAPABILITY,

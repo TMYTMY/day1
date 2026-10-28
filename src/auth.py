@@ -31,6 +31,7 @@ class _Account:
     username: str
     password: str
     role: str
+    email: str | None = None
 
 
 @dataclass(frozen=True)
@@ -92,7 +93,16 @@ def load_directory(path: Path) -> Directory:
             raise ConfigError("Each user needs a username, password, and role.")
         if role not in roles:
             raise ConfigError(f"User {username} references unknown role {role}.")
-        accounts[username] = _Account(username=username, password=password, role=role)
+        email = entry.get("email")
+        if email is not None and (not isinstance(email, str) or "@" not in email):
+            raise ConfigError(f"User {username} has an email that is not an address.")
+        assert isinstance(username, str) and isinstance(password, str)
+        accounts[username] = _Account(
+            username=username,
+            password=password,
+            role=role,
+            email=email.strip() if isinstance(email, str) else None,
+        )
     return Directory(roles=roles, capabilities=capabilities, accounts=accounts)
 
 
@@ -111,6 +121,7 @@ def authenticate(username: str, password: str, path: Path) -> User | None:
         role=account.role,
         allowed_tables=directory.roles[account.role],
         capabilities=directory.capabilities[account.role],
+        email=account.email,
     )
 
 
@@ -131,4 +142,5 @@ def user_named(username: str, path: Path) -> User | None:
         role=account.role,
         allowed_tables=directory.roles[account.role],
         capabilities=directory.capabilities[account.role],
+        email=account.email,
     )

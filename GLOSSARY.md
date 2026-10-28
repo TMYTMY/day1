@@ -42,6 +42,10 @@ Day 1's domain language. One meaning per term. If a word is overloaded, this fil
 
 **Notification** — the email produced by a fire whose comparison triggered. **One notification per triggering fire** — a sustained breach notifies every evaluation, because a silent second day reads as recovery. The fire key, not the notification policy, is what prevents duplicate mail: one period is evaluated once, so a repeated notification always means a new evaluation.
 
+**Delivery** — the act of putting a notification into the mail transport. A delivery is `delivered`, `suppressed`, or `failed`, and it is recorded beside the fire rather than instead of it: a fire can happen and a delivery not. The notification reaches only recipients who may read the metric **when the fire runs**; a recipient set stored on a definition is a claim about who should be told, never a claim about who may still read.
+
+**Suppressed** — a fire whose comparison triggered but where no named recipient may still read the metric. Nothing is sent, and the outcome is its own word: suppressed is neither a success nor an error, because the evaluation was right and the audience was empty.
+
 **Fire key** — the uniqueness key of a fire, built from the alert definition's identity plus the resolved window end. It exists so a restart, a double launch, or an overlapping tick cannot deliver the same period twice.
 
 **State change** — the transition of a comparison from not-triggered to triggered, or back. Recorded for audit and for the notification body, and deliberately **not** used to suppress notifications: a breach that persists is still news.

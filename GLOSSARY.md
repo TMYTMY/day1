@@ -6,7 +6,7 @@ Day 1's domain language. One meaning per term. If a word is overloaded, this fil
 
 **Role** — a named set of readable warehouse tables, defined in configuration (e.g. `analyst`, `finance`). Role names are not hardcoded; a company may invent its own. A role says *what a person may read*, nothing about what they may do.
 
-**Capability** — a named action the product can take on a person's behalf. Exactly three are planned: `query` (ask a question, get a governed answer), `alert` (receive a scheduled notification about a metric), `recipe` (run a saved, parameterised report). A capability is the unit that permissions attach to.
+**Capability** — a named action the product can take on a person's behalf. `query` (ask a question, get a governed answer), `alert` (receive a scheduled notification about a metric), and `admin` (configure the instance: mail settings and the alert list) are implemented. `recipe` (run a saved, parameterised report) is planned. A capability is the unit that permissions attach to. `admin` does not grant table access; the owner role that holds it has an empty table list.
 
 **Capability grant** — the binding of one capability to one role, in configuration. Both a capability grant and a table grant must pass for any action: a role that may read `dau` but holds no `alert` grant cannot create an alert on it.
 

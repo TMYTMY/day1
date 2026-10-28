@@ -77,7 +77,10 @@ def load_directory(path: Path) -> Directory:
         if not isinstance(role, str) or not isinstance(spec, dict):
             raise ConfigError("Each role needs a tables list.")
         tables = spec.get("tables")
-        if not isinstance(tables, list) or not tables or not all(isinstance(t, str) for t in tables):
+        # An empty list is legal. The owner role uses one: administering the
+        # instance is not a grant to read its warehouse tables. A missing list,
+        # or a list that is not names, is still a broken file.
+        if not isinstance(tables, list) or not all(isinstance(item, str) and item for item in tables):
             raise ConfigError(f"Role {role} needs a list of table names.")
         roles[role] = tuple(tables)
         capabilities[role] = _role_capabilities(role, spec)

@@ -1,13 +1,16 @@
 # Demo password stand-in for SSO. Replace authenticate() in src/auth.py
 # before pointing this app at real data. Passwords here are local sample
-# credentials, not production secrets.
+# credentials, not production secrets. The Settings pages are not a substitute
+# for that replacement: they are safe only on an instance that is not exposed
+# to the public.
 #
 # Each role carries two grants: the tables it may read, and the capabilities
-# it may run (an action such as query or alert). A role without a `capabilities`
-# key implies `[query]`, which is what this file did before capabilities
-# existed. The alert grant is deliberately narrow: only analyst may draft and
-# confirm an alert definition, so the refusal a role without it receives stays
-# testable.
+# it may run (an action such as query, alert, or admin). A role without a
+# `capabilities` key implies `[query]`, which is what this file did before
+# capabilities existed. The alert grant is deliberately narrow: only analyst
+# may draft and confirm an alert definition, so the refusal a role without it
+# receives stays testable. The admin grant is a separate decision: the owner
+# role holds it and reads no tables.
 
 roles:
   analyst:
@@ -19,6 +22,9 @@ roles:
   growth:
     tables: [dau]
     capabilities: [query]
+  owner:
+    tables: []
+    capabilities: [admin]
 
 users:
   - username: analyst
@@ -30,3 +36,6 @@ users:
   - username: growth
     password: growth
     role: growth
+  - username: owner
+    password: owner
+    role: owner

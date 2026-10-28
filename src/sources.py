@@ -11,16 +11,10 @@ from urllib.parse import quote
 
 import yaml
 
-from src.config import ROOT, ConfigError
+from src.config import ConfigError, load_settings
 from src.metrics import Metric, active_metrics
 from src.models import User
 from src.routing import Catalog, Topic, load_catalog
-
-DEFAULT_SOURCES_DIR = ROOT / "config" / "sources"
-DEFAULT_SOURCES_DB = ROOT / "data" / "sources.sqlite"
-DEFAULT_STAGING_DIR = ROOT / "data" / "staging"
-DEFAULT_WAREHOUSE_DB = ROOT / "data" / "demo.db"
-DEFAULT_ROUTING = ROOT / "config" / "routing.yaml"
 
 _REQUIRED = (
     "source_id",
@@ -66,16 +60,32 @@ def warehouse_tables(
     routing_path: Path | None = None,
     warehouse_path: Path | None = None,
 ) -> set[str]:
-    """Table names already owned by the routing catalog or the demo warehouse."""
+    """Table names already owned by the routing catalog or the demo warehouse.
+
+    Omitted paths come from settings, so an instance never checks another
+    instance's routing map or warehouse.
+    """
+    route, database = _warehouse_paths(routing_path, warehouse_path)
     names: set[str] = set()
-    route = Path(routing_path) if routing_path is not None else DEFAULT_ROUTING
     if route.is_file():
         catalog = load_catalog(route)
         for topic in catalog.topics:
             names.update(topic.tables)
-    database = Path(warehouse_path) if warehouse_path is not None else DEFAULT_WAREHOUSE_DB
     names.update(_physical_tables(database))
     return names
+
+
+def _warehouse_paths(
+    routing_path: Path | None,
+    warehouse_path: Path | None,
+) -> tuple[Path, Path]:
+    """Explicit paths win; anything omitted comes from this instance's settings."""
+    if routing_path is not None and warehouse_path is not None:
+        return Path(routing_path), Path(warehouse_path)
+    settings = load_settings()
+    route = Path(routing_path) if routing_path is not None else settings.routing_path
+    database = Path(warehouse_path) if warehouse_path is not None else settings.db_path
+    return route, database
 
 
 def reject_warehouse_table(
@@ -99,10 +109,11 @@ def load_sources(
     routing_path: Path | None = None,
     warehouse_path: Path | None = None,
 ) -> dict[str, SourceSpec]:
-    """Read ``config/sources/*.yaml``. Missing fields and duplicate ids or tables fail."""
+    """Read the declared source manifests in ``directory``. Bad fields or duplicates fail."""
     path = Path(directory)
     if not path.is_dir():
         raise ConfigError(f"Sources directory not found: {path}")
+    route, database = _warehouse_paths(routing_path, warehouse_path)
     specs: dict[str, SourceSpec] = {}
     tables: set[str] = set()
     for entry in sorted(path.glob("*.yaml")):
@@ -110,8 +121,8 @@ def load_sources(
         reject_warehouse_table(
             spec.table,
             source_id=spec.source_id,
-            routing_path=routing_path,
-            warehouse_path=warehouse_path,
+            routing_path=route,
+            warehouse_path=database,
         )
         if spec.source_id in specs:
             raise ConfigError(f"Duplicate source id: {spec.source_id}")

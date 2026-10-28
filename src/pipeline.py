@@ -24,7 +24,6 @@ from src.present import local_summary
 from src.prompt import PROMPT_VERSION, build_messages, build_summary_messages
 from src.routing import Catalog, route_question
 from src.sources import (
-    DEFAULT_SOURCES_DB,
     SourceSpec,
     source_status,
     spec_for_table,
@@ -441,7 +440,7 @@ def answer_question(
             table,
             warehouse=adapter,
             sources=sources or {},
-            sources_path=sources_db or DEFAULT_SOURCES_DB,
+            sources_path=sources_db or settings.sources_db,
             statement_timeout_ms=settings.sql_timeout_ms,
         )
         active = resolved.adapter

@@ -1,7 +1,7 @@
 """Load a CSV or Excel file and write its declaration.
 
-Writing ``config/sources/<source_id>.yaml`` is the declaration. A human runs this
-command. A web upload must never call it.
+Writing ``<source_id>.yaml`` into the instance's sources directory is the
+declaration. A human runs this command. A web upload must never call it.
 
 Excel workbooks are read with openpyxl (``data_only=True``). Legacy ``.xls`` is
 rejected. Formula cells with no cached value are staged as NULL and counted.
@@ -25,17 +25,13 @@ from openpyxl import load_workbook
 from openpyxl.utils.exceptions import InvalidFileException
 from openpyxl.worksheet.worksheet import Worksheet
 
-from src.config import ConfigError
+from src.config import ConfigError, load_settings
 from src.sources import (
-    DEFAULT_SOURCES_DB,
-    DEFAULT_SOURCES_DIR,
     SourceSpec,
     load_sources,
     reject_warehouse_table,
     source_from_mapping,
 )
-
-DEFAULT_DB_PATH = DEFAULT_SOURCES_DB
 
 _TABULAR = {".csv", ".tsv"}
 _EXCEL = {".xlsx", ".xlsm"}
@@ -91,8 +87,14 @@ def load_file(
     if not columns:
         raise ConfigError(f"{path.name} has no columns to load.")
 
-    manifest_dir = Path(sources_dir) if sources_dir is not None else DEFAULT_SOURCES_DIR
-    database = Path(db_path) if db_path is not None else DEFAULT_DB_PATH
+    if sources_dir is None or db_path is None:
+        settings = load_settings()
+        if sources_dir is None:
+            sources_dir = settings.sources_dir
+        if db_path is None:
+            db_path = settings.sources_db
+    manifest_dir = Path(sources_dir)
+    database = Path(db_path)
     loaded_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     spec = source_from_mapping(
         {

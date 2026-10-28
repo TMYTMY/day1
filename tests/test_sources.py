@@ -529,7 +529,8 @@ def test_owner_role_does_not_grant_query_access(env, tmp_path):
 def test_quarantine_uploads_do_not_overwrite_each_other(tmp_path, monkeypatch):
     import app
 
-    monkeypatch.setattr(app, "DEFAULT_STAGING_DIR", tmp_path / "staging")
+    monkeypatch.setenv("SOURCES_STAGING_DIR", str(tmp_path / "staging"))
+    settings = app.load_settings()
     alice = User("alice", "analyst", ("revenue",))
     bob = User("bob", "finance", ("revenue",))
 
@@ -541,16 +542,16 @@ def test_quarantine_uploads_do_not_overwrite_each_other(tmp_path, monkeypatch):
         def getvalue(self) -> bytes:
             return self._data
 
-    first = app._stage_upload(_Upload("orders.csv", b"alice-first"), alice)
-    second = app._stage_upload(_Upload("orders.csv", b"alice-second"), alice)
-    other = app._stage_upload(_Upload("orders.csv", b"bob"), bob)
+    first = app._stage_upload(_Upload("orders.csv", b"alice-first"), alice, settings)
+    second = app._stage_upload(_Upload("orders.csv", b"alice-second"), alice, settings)
+    other = app._stage_upload(_Upload("orders.csv", b"bob"), bob, settings)
     assert first.read_bytes() == b"alice-first"
     assert second.read_bytes() == b"alice-second"
     assert other.read_bytes() == b"bob"
     assert first != second
     assert other.parent != first.parent
-    assert {path.name for path in app._staged_files(alice)} == {first.name, second.name}
-    assert [path.name for path in app._staged_files(bob)] == [other.name]
+    assert {path.name for path in app._staged_files(alice, settings)} == {first.name, second.name}
+    assert [path.name for path in app._staged_files(bob, settings)] == [other.name]
 
 
 def test_sources_adapter_does_not_seed_over_declared_rows(tmp_path, monkeypatch):

@@ -51,6 +51,11 @@ class Settings:
     max_llm_calls_per_day: int = 500
     sql_timeout_ms: int = DEFAULT_SQL_TIMEOUT_MS
     metrics_path: Path = field(default_factory=lambda: ROOT / "config" / "metrics.yaml")
+    # A declared source belongs to one instance. These three paths must never be
+    # shared between two instances on the same machine.
+    sources_dir: Path = field(default_factory=lambda: ROOT / "config" / "sources")
+    sources_db: Path = field(default_factory=lambda: ROOT / "data" / "sources.sqlite")
+    sources_staging_dir: Path = field(default_factory=lambda: ROOT / "data" / "staging")
 
     def __repr__(self) -> str:
         key_state = "set" if self.openrouter_api_key else "unset"
@@ -137,4 +142,7 @@ def load_settings() -> Settings:
         max_llm_calls_per_day=max_llm_calls_per_day,
         sql_timeout_ms=sql_timeout_ms,
         metrics_path=_resolve(os.environ.get("METRICS_PATH", ""), "config/metrics.yaml"),
+        sources_dir=_resolve(os.environ.get("SOURCES_DIR", ""), "config/sources"),
+        sources_db=_resolve(os.environ.get("SOURCES_DB", ""), "data/sources.sqlite"),
+        sources_staging_dir=_resolve(os.environ.get("SOURCES_STAGING_DIR", ""), "data/staging"),
     )

@@ -31,9 +31,6 @@ from src.pipeline import answer_question
 from src.present import column_label, format_value, is_money, looks_like_time
 from src.routing import Catalog, load_catalog
 from src.sources import (
-    DEFAULT_SOURCES_DB,
-    DEFAULT_SOURCES_DIR,
-    DEFAULT_STAGING_DIR,
     SourceSpec,
     load_sources,
     merge_catalog,
@@ -363,7 +360,7 @@ def _run_turn(
             llm=llm,
             knowledge=knowledge,
             sources=sources,
-            sources_db=DEFAULT_SOURCES_DB,
+            sources_db=settings.sources_db,
         )
     except Exception:
         logger.exception("answer failed")
@@ -449,9 +446,9 @@ _STAGED_SUFFIXES = {".csv", ".tsv", ".xlsx", ".xlsm"}
 _STAGED_NAME = re.compile(r"[^A-Za-z0-9._-]+")
 
 
-def _user_staging_dir(user: User) -> Path:
+def _user_staging_dir(user: User, settings: Settings) -> Path:
     safe = _STAGED_NAME.sub("_", user.username).strip("._") or "user"
-    return DEFAULT_STAGING_DIR / safe
+    return settings.sources_staging_dir / safe
 
 
 def _unused_staged_path(folder: Path, safe: str) -> Path:
@@ -468,7 +465,7 @@ def _unused_staged_path(folder: Path, safe: str) -> Path:
     raise ValueError("Could not stage the file without overwriting an existing one.")
 
 
-def _stage_upload(uploaded, user: User) -> Path:
+def _stage_upload(uploaded, user: User, settings: Settings) -> Path:
     """Park an upload in that user's quarantine. This does not declare the source."""
     original = Path(str(getattr(uploaded, "name", "") or "")).name
     suffix = Path(original).suffix.lower()
@@ -479,15 +476,15 @@ def _stage_upload(uploaded, user: User) -> Path:
     safe = _STAGED_NAME.sub("_", original).strip("._") or "upload"
     if not safe.lower().endswith(suffix):
         safe = f"{safe}{suffix}"
-    folder = _user_staging_dir(user)
+    folder = _user_staging_dir(user, settings)
     folder.mkdir(parents=True, exist_ok=True)
     destination = _unused_staged_path(folder, safe)
     destination.write_bytes(uploaded.getvalue())
     return destination
 
 
-def _staged_files(user: User) -> list[Path]:
-    folder = _user_staging_dir(user)
+def _staged_files(user: User, settings: Settings) -> list[Path]:
+    folder = _user_staging_dir(user, settings)
     if not folder.is_dir():
         return []
     return sorted(path for path in folder.iterdir() if path.is_file())
@@ -508,11 +505,12 @@ def _source_rows(
     sources: dict[str, SourceSpec],
     catalogue,
     *,
+    sources_db: Path,
     statement_timeout_ms: int = DEFAULT_STATEMENT_TIMEOUT_MS,
 ) -> list[dict[str, object]]:
     rows = []
     for spec in sources.values():
-        as_of = read_as_of(spec, DEFAULT_SOURCES_DB, statement_timeout_ms=statement_timeout_ms)
+        as_of = read_as_of(spec, sources_db, statement_timeout_ms=statement_timeout_ms)
         rows.append(
             {
                 "source_id": spec.source_id,
@@ -553,20 +551,25 @@ def _render_sources_page(user: User, settings: Settings, sources: dict[str, Sour
         key="source_upload",
         help="The file stays in quarantine until someone runs the declaration command.",
     )
-    staged_now = _consume_staged_uploads(uploads or [], user)
+    staged_now = _consume_staged_uploads(uploads or [], user, settings)
     try:
         catalogue = load_metrics(settings.metrics_path)
     except ConfigError as exc:
         st.error(str(exc))
         catalogue = []
-    rows = _source_rows(visible, catalogue, statement_timeout_ms=settings.sql_timeout_ms)
+    rows = _source_rows(
+        visible,
+        catalogue,
+        sources_db=settings.sources_db,
+        statement_timeout_ms=settings.sql_timeout_ms,
+    )
     if rows:
         st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
     elif sources:
         st.info("No declared sources are visible for your role.")
     else:
         st.info("No declared sources yet. A file is not queryable until its YAML manifest is written.")
-    staged = _staged_files(user)
+    staged = _staged_files(user, settings)
     if staged or staged_now:
         st.markdown("**Quarantine**")
         st.caption("Each file below is still quarantined. Uploading it did not declare a source.")
@@ -575,7 +578,7 @@ def _render_sources_page(user: User, settings: Settings, sources: dict[str, Sour
             st.code(_declare_command(path), language="text")
 
 
-def _consume_staged_uploads(uploads: list, user: User) -> list[str]:
+def _consume_staged_uploads(uploads: list, user: User, settings: Settings) -> list[str]:
     seen: list[str] = st.session_state.setdefault("staged_seen_ids", [])
     fresh: list[str] = []
     for uploaded in uploads:
@@ -583,7 +586,7 @@ def _consume_staged_uploads(uploads: list, user: User) -> list[str]:
         if file_id in seen:
             continue
         try:
-            path = _stage_upload(uploaded, user)
+            path = _stage_upload(uploaded, user, settings)
         except ValueError as exc:
             st.error(str(exc))
             continue
@@ -622,7 +625,11 @@ def main() -> None:
     try:
         settings = load_settings()
         adapter = build_adapter(settings)
-        sources = load_sources(DEFAULT_SOURCES_DIR)
+        sources = load_sources(
+            settings.sources_dir,
+            routing_path=settings.routing_path,
+            warehouse_path=settings.db_path,
+        )
         catalog = merge_catalog(load_catalog(settings.routing_path), sources)
         audit = AuditLog(settings.audit_path)
         llm = LlmClient(

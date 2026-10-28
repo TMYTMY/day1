@@ -35,7 +35,14 @@ definition is marked failing, later deliveries are refused before the transport
 is touched, and the owner is told once — not once per attempt, and not once per
 tick. A delivered message clears the streak. The guard is injected: a caller
 with no store gets the stop *within* a delivery (no retry) but no memory across
-ticks, and the notice it sends says so.
+ticks, and the notice it sends says so. A deployment wires it through
+:meth:`Notifier.from_settings`, and the worker uses that constructor, so the
+stop holds from one tick to the next — and across processes, because the streak
+is a row in the alert database rather than a field in memory.
+
+Delivery *health* is not this module's to keep: one row per finished
+notification is written by the worker to the instance settings database
+(:mod:`src.delivery_health`), which is the one log the Alerts page reads.
 
 No model call and no network happen anywhere in this module except inside
 ``SmtpSender.send`` (see docs/adr/0003-model-authors-definitions-not-execution.md).
@@ -750,7 +757,11 @@ class Notifier:
                 ),
             )
 
-        self._record_failure(definition, error)
+        # A retry-exhausted delivery is recorded once, by the caller that owns
+        # the instance's delivery log (``Worker._record_delivery_health`` →
+        # ``src.delivery_health``). The guard beside it keeps only the
+        # authentication streak, so there is one record of a failed send and
+        # one place a page reads it from.
         owner_notified, owner_error = self._notify_owner(
             definition=definition,
             metric_title=metric.title,
@@ -803,21 +814,12 @@ class Notifier:
             return None
 
     def _record_success(self, definition: AlertDefinition) -> None:
-        """Clear this definition's streak, because a message just got through."""
+        """Clear this definition's streak, because the credential was accepted."""
         if self._guard is None:
             return
         try:
             self._guard.record_success(definition.id, at=self._clock())
         except Exception:  # noqa: BLE001 - the email is what matters, not the note
-            return
-
-    def _record_failure(self, definition: AlertDefinition, error: str | None) -> None:
-        """Record a non-authentication failure, so the health line can count it."""
-        if self._guard is None:
-            return
-        try:
-            self._guard.record_failure(definition.id, at=self._clock(), error=error)
-        except Exception:  # noqa: BLE001
             return
 
     def _auth_failure(

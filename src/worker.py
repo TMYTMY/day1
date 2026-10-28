@@ -384,11 +384,15 @@ class Worker:
             fires=FireStore(settings.alerts_path),
             titles=titles,
             clock=clock,
-            notifier=Notifier(
+            # Built through the guarded constructor, not directly: that is what
+            # gives the notifier the delivery guard's storage, so a password the
+            # mail server has rejected three times still stops the fourth tick.
+            notifier=Notifier.from_settings(
+                settings,
                 sender=transport,
-                users_path=settings.users_path,
                 titles=titles,
                 sleep=sleep,
+                clock=clock,
             ),
             state=(
                 state

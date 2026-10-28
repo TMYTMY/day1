@@ -10,6 +10,7 @@ data rather than against itself.
 from __future__ import annotations
 
 import sqlite3
+import smtplib
 from dataclasses import fields, replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -38,6 +39,7 @@ from src.instance import InstanceState
 from src.instance_identity import IdentityStore, running_hostname
 from src.metrics import load_metrics, measure_column
 from src.notify import Delivery, Notifier, RecordingSender
+from src.send_safety import AUTH_FAILURE_LIMIT, DeliveryGuard
 from src.worker import (
     OUTCOME_DUPLICATE,
     OUTCOME_FAILED,
@@ -1458,3 +1460,114 @@ def test_the_command_flag_confirms_the_move_and_delivers(instance, monkeypatch):
     events = [row["event_type"] for row in _audit_rows(instance)]
     assert events.count("instance_identity_moved") == 1
     assert "instance_identity_mismatch" not in events
+
+
+# --- one delivery health, and the guarded notifier (ticket #30) -----------
+#
+# #28 records delivery health in the settings database and #29 stops at a
+# rejected password. These tests are the join: the worker builds its notifier
+# through the guarded constructor, and the line the Alerts page renders is the
+# one a real tick's delivery produces.
+
+
+class _RejectingPassword(RecordingSender):
+    """A transport that answers every login with 535, and records the attempt."""
+
+    def send(self, message) -> None:
+        self.attempts += 1
+        raise smtplib.SMTPAuthenticationError(
+            535, b"535 5.7.8 Username and Password not accepted"
+        )
+
+
+def test_from_settings_builds_the_notifier_through_the_guarded_constructor(instance):
+    """Mutation: constructing ``Notifier`` directly here drops the guard again."""
+    sender = RecordingSender()
+
+    worker = Worker.from_settings(
+        instance.settings,
+        audit=instance.audit,
+        catalog=instance.catalog,
+        clock=lambda: _NOW,
+        sender=sender,
+        sleep=lambda seconds: None,
+    )
+
+    assert worker.notifier is not None
+    assert worker.notifier.sender is sender
+    assert worker.notifier.guard is not None
+    assert worker.notifier.guard.path == instance.settings.alerts_path
+    assert worker.notifier.guard.limit == AUTH_FAILURE_LIMIT
+
+
+def test_a_rejected_password_recorded_by_an_earlier_tick_stops_the_next_one(instance):
+    """The stop is a fact in storage, so it holds from one tick to the next.
+
+    Mutation: bypassing ``Notifier.from_settings`` in the worker turns this red,
+    because the delivery then presents the rejected credential one more time.
+    """
+    definition = _live(instance)
+    # Three rejections recorded by an earlier tick — another process, hours ago.
+    guard = DeliveryGuard(instance.settings.alerts_path, clock=lambda: _NOW)
+    for _ in range(AUTH_FAILURE_LIMIT):
+        guard.record_auth_failure(definition.id, at=_NOW, error="535 rejected")
+    assert DeliveryGuard(instance.settings.alerts_path).refusal(
+        definition.id, now=_NOW
+    ) is not None
+
+    sender = _RejectingPassword()
+    worker = Worker.from_settings(
+        instance.settings,
+        audit=instance.audit,
+        catalog=instance.catalog,
+        clock=lambda: _NOW,
+        sender=sender,
+        sleep=lambda seconds: None,
+    )
+
+    outcome = worker.tick()[0]
+
+    assert outcome.outcome == OUTCOME_FAILED
+    assert outcome.delivery is not None
+    assert outcome.delivery.stopped is True
+    assert outcome.delivery.attempts == 0
+    # Nothing reached the transport: no credential was presented again.
+    assert sender.attempts == 0
+    assert sender.messages == []
+    assert "was not attempted" in outcome.delivery.message
+    assert "Fix the password in Settings" in outcome.delivery.message
+    # The failed run is still the instance's own news: it is in the health log.
+    assert _health(instance).state == HEALTH_FAILING
+
+
+def test_a_worker_delivery_makes_each_definitions_own_line_read_truthfully(instance):
+    """One tick, two definitions: the line is about the row, not the instance."""
+    from src.send_safety import health_line
+
+    delivered = _live(instance)
+    quiet = _live(instance, constant=1_000_000_000_000)
+    sender = RecordingSender()
+
+    outcomes = _instance_worker(instance, sender, host="host-a").tick()
+
+    by_id = {outcome.alert_id: outcome for outcome in outcomes}
+    assert by_id[delivered.id].outcome == OUTCOME_FIRED
+    assert by_id[quiet.id].outcome == OUTCOME_NOT_FIRED
+    assert len(sender.messages) == 1
+
+    line = health_line(by_id[delivered.id].definition, instance.settings, now=_NOW)
+    assert "Delivery health: healthy" in line
+    # The definition that has never delivered has no attempts of its own, so its
+    # row says never sent — not healthy, and not "nothing is known".
+    quiet_line = health_line(by_id[quiet.id].definition, instance.settings, now=_NOW)
+    assert "Delivery health: never sent" in quiet_line
+    assert "healthy" not in quiet_line
+
+    scoped = delivery_health(
+        instance.settings.settings_path, alert_id=delivered.id, now=_NOW
+    )
+    assert scoped.state == HEALTH_HEALTHY
+    assert scoped.attempts[0].fire_key == by_id[delivered.id].fire_key
+    assert delivery_health(
+        instance.settings.settings_path, alert_id=quiet.id, now=_NOW
+    ).state == HEALTH_NEVER_SENT

@@ -19,6 +19,12 @@ from datetime import datetime, timedelta, timezone
 
 from src.config import ROOT
 from src.crypto import generate_key
+from src.delivery_health import (
+    ATTEMPT_DELIVERED,
+    ATTEMPT_FAILED,
+    DeliveryHealthStore,
+    delivery_health,
+)
 from src.mail_setup import CheckResult
 from src.models import User
 from src.send_safety import (
@@ -259,44 +265,46 @@ def test_a_health_record_that_is_absent_is_not_a_healthy_one(tmp_path):
     assert empty.kind == UNKNOWN
     assert empty.known is False
 
-    # A database that exists but has no delivery records is the same answer:
+    # A store that exists but has never recorded an attempt is the same answer:
     # nothing was recorded, so nothing is known.
-    (tmp_path / "alerts.db").write_bytes(b"")
-    assert read_health(tmp_path / "alerts.db", 7).kind == UNKNOWN
+    (tmp_path / "instance.db").write_bytes(b"")
+    assert read_health(tmp_path / "instance.db", 7).kind == UNKNOWN
     assert "unavailable" in UNAVAILABLE
     assert "healthy" not in UNAVAILABLE.lower()
 
 
 def test_each_health_state_has_its_own_line(tmp_path):
-    alerts = tmp_path / "alerts.db"
-    guard = DeliveryGuard(alerts)
+    settings = _settings(tmp_path)
+    # The canonical log: the instance settings database, the one the worker
+    # writes (#30). The alert database is not a health source any more.
+    store = DeliveryHealthStore(settings.settings_path)
     definition = type("Definition", (), {"id": 7})()
-    settings = _settings(tmp_path, alerts_path=alerts)
     now = datetime(2026, 10, 28, 12, 0, tzinfo=timezone.utc)
 
-    # No rows for this definition, but the table exists: never sent.
-    guard.record_success(99, at=now)
-    assert read_health(alerts, 7, now=now).kind == NEVER_SENT
+    # The log exists and holds another definition's attempt: this one has no
+    # attempts of its own, which is never sent rather than unavailable.
+    store.record(outcome=ATTEMPT_DELIVERED, at=now, alert_id=99)
+    assert read_health(settings.settings_path, 7, now=now).kind == NEVER_SENT
     assert "never sent" in health_line(definition, settings, now=now)
 
     # A delivered message: healthy, and it names the age.
-    guard.record_success(7, at=now - timedelta(minutes=5))
-    health = read_health(alerts, 7, now=now)
+    store.record(outcome=ATTEMPT_DELIVERED, at=now - timedelta(minutes=5), alert_id=7)
+    health = read_health(settings.settings_path, 7, now=now)
     assert health.kind == HEALTHY
     assert "healthy" in health_line(definition, settings, now=now)
     assert "5 minutes ago" in health_line(definition, settings, now=now)
 
     # The same record, three days later: stale rather than healthy.
     later = now + timedelta(days=3)
-    assert read_health(alerts, 7, now=later).kind == STALE
+    assert read_health(settings.settings_path, 7, now=later).kind == STALE
     stale_line = health_line(definition, settings, now=later)
     assert "stale" in stale_line
     assert "may reach nobody" in stale_line
 
     # Two failures after the success: failing, with the count.
-    guard.record_failure(7, at=now)
-    guard.record_failure(7, at=now)
-    health = read_health(alerts, 7, now=now)
+    store.record(outcome=ATTEMPT_FAILED, at=now, alert_id=7, error="relay down")
+    store.record(outcome=ATTEMPT_FAILED, at=now, alert_id=7, error="relay down")
+    health = read_health(settings.settings_path, 7, now=now)
     assert health.kind == FAILING
     assert health.count == 2
     line = health_line(definition, settings, now=now)
@@ -452,13 +460,91 @@ def test_the_alerts_page_shows_the_delivery_line(monkeypatch, tmp_path):
 
     # No delivery has been recorded: the page says the records are unavailable
     # rather than showing a healthy default. This is the state a fresh instance
-    # is in, and the state this branch would be in before #28 lands.
+    # is in, before its worker has delivered anything.
     assert "Delivery health: unavailable" in page
     assert "Delivery health: healthy" not in page
 
     # Once the delivery path records a message for this definition, the line
-    # says so — and a definition with no records says never sent.
-    DeliveryGuard(tmp_path / "alerts.db").record_success(live)
+    # says so — and a definition with no records of its own says never sent.
+    DeliveryHealthStore(tmp_path / "instance.db").record(
+        outcome=ATTEMPT_DELIVERED, alert_id=live
+    )
+    at = _open_alerts_page(monkeypatch, tmp_path, users)
+    page = _blob(at)
+    assert "Delivery health: healthy" in page
+    assert "Delivery health: unavailable" not in page
+
+
+def test_the_page_reads_healthy_after_a_real_worker_delivery(monkeypatch, tmp_path, env):
+    """The two halves talk: the row the worker writes is the row the page reads.
+
+    Nothing here inserts a health row by hand. A definition is drafted and
+    confirmed through ``AlertService``, one real ``Worker.tick`` evaluates it,
+    the notifier delivers to a recording transport, the worker records the
+    attempt in the instance settings database, and the Alerts page — the real
+    Streamlit page, over that same database — renders the line from it.
+    """
+    from dataclasses import replace as _replace
+
+    from src.alerts import AlertService
+    from src.audit import AuditLog
+    from src.auth import authenticate
+    from src.notify import RecordingSender
+    from src.routing import load_catalog
+    from src.worker import OUTCOME_FIRED, Worker
+
+    users = _plant_directory(tmp_path)
+    settings = _replace(
+        env.settings,
+        alerts_path=tmp_path / "alerts.db",
+        users_path=users,
+        settings_path=tmp_path / "instance.db",
+    )
+    audit = AuditLog(settings.audit_path)
+    catalog = load_catalog(settings.routing_path)
+    service = AlertService.from_settings(settings, audit=audit, catalog=catalog)
+    actor = authenticate("lead", "lead", users)
+    assert actor is not None
+    drafted = service.draft(
+        actor,
+        metric_id=METRIC_ID,
+        comparison="above_absolute",
+        constant=1.0,
+        window_days=7,
+        cadence="daily",
+        local_time="09:00",
+        recipients=("finance",),
+    )
+    assert drafted.ok is True, drafted.message
+    confirmed = service.confirm(drafted.definition.id, actor)
+    assert confirmed.ok is True, confirmed.message
+
+    now = datetime.now(timezone.utc)
+    sender = RecordingSender()
+    worker = Worker.from_settings(
+        settings,
+        audit=audit,
+        catalog=catalog,
+        clock=lambda: now,
+        sender=sender,
+        sleep=lambda seconds: None,
+    )
+
+    outcomes = worker.tick()
+
+    assert [outcome.outcome for outcome in outcomes] == [OUTCOME_FIRED], outcomes[0].message
+    assert len(sender.messages) == 1  # the delivery really happened
+    # The canonical read, about this definition only.
+    scoped = delivery_health(
+        settings.settings_path, alert_id=confirmed.definition.id, now=now
+    )
+    assert scoped.state == "healthy"
+    assert scoped.attempts[0].fire_key == outcomes[0].fire_key
+    assert "Delivery health: healthy" in health_line(
+        confirmed.definition, settings, now=now
+    )
+
+    # And the page an operator opens reads the same row.
     at = _open_alerts_page(monkeypatch, tmp_path, users)
     page = _blob(at)
     assert "Delivery health: healthy" in page
@@ -478,9 +564,9 @@ def _open_alerts_page(monkeypatch, tmp_path, users) -> AppTest:
 def test_the_alerts_page_shows_a_failing_count(monkeypatch, tmp_path):
     users = _plant_directory(tmp_path)
     live = _alerts_with_addresses(tmp_path)
-    guard = DeliveryGuard(tmp_path / "alerts.db")
+    store = DeliveryHealthStore(tmp_path / "instance.db")
     for _ in range(AUTH_FAILURE_LIMIT):
-        guard.record_auth_failure(live, error="535")
+        store.record(outcome=ATTEMPT_FAILED, alert_id=live, error="535")
     at = _open_alerts_page(monkeypatch, tmp_path, users)
 
     page = _blob(at)

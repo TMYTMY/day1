@@ -24,6 +24,18 @@ read-only and, when the file or the table is absent, answers ``never_sent``
 without creating either. That is what lets a page ask "is delivery alive?"
 about an instance that has never sent anything.
 
+**One question, one definition.** ``read(alert_id=...)`` narrows the whole
+answer — last success, last failure, streak and history — to the attempts of
+one alert definition. A definition with no attempts of its own reads
+``never_sent`` even when other definitions have delivered, which is what lets
+the Alerts page say something true about a row that has never fired. Omitting
+``alert_id`` keeps the instance-wide answer.
+
+This log is the canonical record of delivery health for the product. The alert
+database keeps a different fact beside the fire log — the per-definition
+authentication bookkeeping of :class:`src.send_safety.DeliveryGuard` — and
+nothing derives health from it.
+
 The state is one of four, and ``failing`` wins over ``stale`` because a failure
 is a fact while staleness is an inference:
 
@@ -172,6 +184,10 @@ class DeliveryHealth:
 
     Everything here comes from the attempt log: no network call, no send, no
     key, and no reading of the mail settings. ``attempts`` is newest first.
+
+    Every field is scoped to the question that was asked: the whole instance
+    when the read named no definition, and one definition's own attempts when
+    it did.
     """
 
     state: str
@@ -325,17 +341,26 @@ class DeliveryHealthStore:
         now: datetime | None = None,
         window: timedelta = DEFAULT_ALIVE_WINDOW,
         attempts_limit: int = ATTEMPT_HISTORY,
+        alert_id: int | None = None,
     ) -> DeliveryHealth:
         """Answer "is delivery alive?" from the stored attempts, and write nothing.
 
         A missing file, a missing table and an empty table all mean the same
         thing: nothing has been recorded, so nothing has been proved.
+
+        ``alert_id`` narrows the answer to one definition. That definition's
+        own attempts decide its state, so a definition that has never delivered
+        reads ``never_sent`` while a neighbouring definition is healthy, and a
+        failure of one definition never marks another failing. ``None`` asks
+        the instance-wide question, which is the same answer this method gave
+        before the filter existed.
         """
         checked_at = _aware(now or datetime.now(timezone.utc))
         span = window if window > timedelta(0) else DEFAULT_ALIVE_WINDOW
-        rows = self._recent_attempts(attempts_limit)
+        wanted = None if alert_id is None else int(alert_id)
+        rows = self._recent_attempts(attempts_limit, alert_id=wanted)
         attempts = tuple(_attempt(row) for row in rows)
-        outcomes = self._send_outcomes()
+        outcomes = self._send_outcomes(alert_id=wanted)
 
         last_success = next(
             (attempt.at for attempt in attempts if attempt.delivered), None
@@ -378,7 +403,14 @@ class DeliveryHealthStore:
         """Every recorded attempt, newest first. The whole log when ``limit`` is None."""
         return [_attempt(row) for row in self._recent_attempts(limit)]
 
-    def _table_exists(self) -> bool:
+    def has_log(self) -> bool:
+        """True when this instance's attempt log exists and can be read.
+
+        This is the question a page asks before it says anything else: a store
+        that is absent, unreadable or written by a build that never recorded an
+        attempt has no health answer at all, which is not the same as "nothing
+        has been sent yet". Reading it writes nothing — no file, no table.
+        """
         if not self.path.exists():
             return False
         try:
@@ -395,38 +427,60 @@ class DeliveryHealthStore:
             conn.close()
         return found is not None
 
-    def _recent_attempts(self, limit: int | None) -> list[sqlite3.Row]:
-        """Stored attempts, newest first. A store with no table has none."""
-        if not self._table_exists():
+    def _recent_attempts(
+        self, limit: int | None, *, alert_id: int | None = None
+    ) -> list[sqlite3.Row]:
+        """Stored attempts, newest first. A store with no table has none.
+
+        ``alert_id`` restricts the rows to one definition's own attempts. It is
+        a bound parameter, never interpolated: the id is a number from a stored
+        definition, and a statement is not the place to find out otherwise.
+        """
+        if not self.has_log():
             return []
-        sql = "SELECT * FROM delivery_attempts ORDER BY id DESC"
-        parameters: tuple = ()
+        sql = "SELECT * FROM delivery_attempts"
+        conditions: list[str] = []
+        parameters: list[object] = []
+        if alert_id is not None:
+            conditions.append("alert_id = ?")
+            parameters.append(int(alert_id))
+        if conditions:
+            sql += " WHERE " + " AND ".join(conditions)
+        sql += " ORDER BY id DESC"
         if limit is not None:
             sql += " LIMIT ?"
-            parameters = (max(1, int(limit)),)
+            parameters.append(max(1, int(limit)))
         conn = self._read_only(self.path)
         try:
-            return list(conn.execute(sql, parameters).fetchall())
+            return list(conn.execute(sql, tuple(parameters)).fetchall())
         finally:
             conn.close()
 
-    def _send_outcomes(self) -> list[str]:
+    def _send_outcomes(self, *, alert_id: int | None = None) -> list[str]:
         """The outcomes offered to a mail server, newest first.
 
         The streak is counted over this list and nothing else, so a suppression
         in the middle of a run of failures neither hides a failure nor pretends
         to be a success. Read in full: a bounded read would cap the streak at
         whatever number a page happened to ask for.
+
+        A per-definition read counts that definition's streak, which is the one
+        a definition's row is about; an instance-wide read counts the
+        instance's.
         """
-        if not self._table_exists():
+        if not self.has_log():
             return []
+        sql = (
+            "SELECT outcome FROM delivery_attempts WHERE outcome IN (?, ?)"
+        )
+        parameters: list[object] = list(SEND_OUTCOMES)
+        if alert_id is not None:
+            sql += " AND alert_id = ?"
+            parameters.append(int(alert_id))
+        sql += " ORDER BY id DESC"
         conn = self._read_only(self.path)
         try:
-            rows = conn.execute(
-                "SELECT outcome FROM delivery_attempts WHERE outcome IN (?, ?) "
-                "ORDER BY id DESC",
-                SEND_OUTCOMES,
-            ).fetchall()
+            rows = conn.execute(sql, tuple(parameters)).fetchall()
         finally:
             conn.close()
         return [str(row["outcome"]) for row in rows]
@@ -447,6 +501,7 @@ def _attempt(row: sqlite3.Row) -> DeliveryAttempt:
 def delivery_health(
     settings_path: Path | str,
     *,
+    alert_id: int | None = None,
     now: datetime | None = None,
     window: timedelta = DEFAULT_ALIVE_WINDOW,
     attempts_limit: int = ATTEMPT_HISTORY,
@@ -457,7 +512,11 @@ def delivery_health(
     database path (``Settings.settings_path``) and the window the instance
     expects, and render :attr:`DeliveryHealth.summary` with the fields behind
     it. It opens no socket, sends nothing, and needs no key.
+
+    ``alert_id`` asks the same question about one alert definition; without it
+    the answer is the instance's. A definition with no attempts of its own is
+    ``never_sent`` even when other definitions have delivered.
     """
     return DeliveryHealthStore(Path(settings_path)).read(
-        now=now, window=window, attempts_limit=attempts_limit
+        now=now, window=window, attempts_limit=attempts_limit, alert_id=alert_id
     )

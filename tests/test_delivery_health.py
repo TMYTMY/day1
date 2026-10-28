@@ -309,3 +309,95 @@ def test_a_zero_window_falls_back_to_the_default(store):
 
     assert health.window == DEFAULT_ALIVE_WINDOW
     assert health.state == HEALTH_HEALTHY
+
+
+# --- one question, one definition (issue #30) -----------------------------
+
+
+def test_an_alert_id_limits_the_answer_to_that_definitions_attempts(store):
+    """The instance is failing while the definition that delivered is healthy."""
+    delivered = NOW - timedelta(hours=1)
+    store.record(outcome=ATTEMPT_DELIVERED, at=delivered, alert_id=99)
+    store.record(outcome=ATTEMPT_FAILED, at=NOW, alert_id=7, error="relay down")
+
+    instance = store.read(now=NOW)
+    assert instance.state == HEALTH_FAILING
+    assert instance.streak == 1
+
+    healthy = store.read(now=NOW, alert_id=99)
+    assert healthy.state == HEALTH_HEALTHY
+    assert healthy.last_success_at == delivered
+    assert healthy.last_failure_at is None
+    assert healthy.streak == 0
+    assert [attempt.alert_id for attempt in healthy.attempts] == [99]
+
+    failing = store.read(now=NOW, alert_id=7)
+    assert failing.state == HEALTH_FAILING
+    assert failing.streak == 1
+    assert failing.last_error == "relay down"
+    assert failing.last_success_at is None
+
+
+def test_a_definition_with_no_attempts_of_its_own_is_never_sent(store):
+    """Another definition's delivery proves nothing about this one."""
+    store.record(outcome=ATTEMPT_DELIVERED, at=NOW - timedelta(minutes=1), alert_id=1)
+
+    health = store.read(now=NOW, alert_id=2)
+
+    assert health.state == HEALTH_NEVER_SENT
+    assert health.alive is False
+    assert health.attempts == ()
+    assert health.last_success_at is None
+    # The instance-wide question still sees the delivery.
+    assert store.read(now=NOW).state == HEALTH_HEALTHY
+
+
+def test_an_attempt_with_no_definition_belongs_to_the_instance_only(store):
+    """A row the worker recorded without a definition is not any definition's."""
+    store.record(outcome=ATTEMPT_DELIVERED, at=NOW)
+
+    assert store.read(now=NOW).state == HEALTH_HEALTHY
+    assert store.read(now=NOW, alert_id=5).state == HEALTH_NEVER_SENT
+
+
+def test_a_streak_is_counted_per_definition(store):
+    store.record(outcome=ATTEMPT_DELIVERED, at=NOW - timedelta(hours=3), alert_id=7)
+    store.record(outcome=ATTEMPT_FAILED, at=NOW - timedelta(hours=2), alert_id=8, error="a")
+    store.record(outcome=ATTEMPT_FAILED, at=NOW - timedelta(hours=1), alert_id=8, error="b")
+
+    assert store.read(now=NOW, alert_id=7).streak == 0
+    assert store.read(now=NOW, alert_id=7).state == HEALTH_HEALTHY
+    assert store.read(now=NOW, alert_id=8).streak == 2
+    assert store.read(now=NOW, alert_id=8).state == HEALTH_FAILING
+
+
+def test_the_alert_id_is_a_bound_parameter(store):
+    """A definition id is data: the statement that reads it is not built from it."""
+    store.record(outcome=ATTEMPT_DELIVERED, at=NOW, alert_id=1)
+
+    # An id that is not a number is refused by the conversion, not by SQL.
+    with pytest.raises(ValueError):
+        store.read(now=NOW, alert_id="1 OR 1=1")
+
+
+def test_the_module_read_takes_the_same_filter(path):
+    DeliveryHealthStore(path).record(outcome=ATTEMPT_DELIVERED, at=NOW, alert_id=3)
+
+    assert delivery_health(path, now=NOW).state == HEALTH_HEALTHY
+    assert delivery_health(path, alert_id=3, now=NOW).state == HEALTH_HEALTHY
+    assert delivery_health(path, alert_id=4, now=NOW).state == HEALTH_NEVER_SENT
+
+
+def test_presence_is_a_question_that_writes_nothing(path):
+    store = DeliveryHealthStore(path)
+    assert store.has_log() is False
+    assert not path.exists()
+
+    store.record(outcome=ATTEMPT_DELIVERED, at=NOW, alert_id=1)
+
+    assert store.has_log() is True
+    # The empty-file case: present, unreadable as a log, and still nothing's
+    # proof. This is the state a page must render as unavailable.
+    blank = path.parent / "blank.db"
+    blank.write_bytes(b"")
+    assert DeliveryHealthStore(blank).has_log() is False

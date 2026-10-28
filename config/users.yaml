@@ -3,13 +3,16 @@
 # credentials, not production secrets.
 #
 # Each role carries two grants: the tables it may read, and the capabilities
-# it may run (an action such as query). A role without a `capabilities` key
-# implies `[query]`, which is what this file did before capabilities existed.
+# it may run (an action such as query or alert). A role without a `capabilities`
+# key implies `[query]`, which is what this file did before capabilities
+# existed. The alert grant is deliberately narrow: only analyst may draft and
+# confirm an alert definition, so the refusal a role without it receives stays
+# testable.
 
 roles:
   analyst:
     tables: [revenue, dau]
-    capabilities: [query]
+    capabilities: [query, alert]
   finance:
     tables: [revenue]
     capabilities: [query]

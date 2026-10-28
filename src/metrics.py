@@ -194,6 +194,32 @@ def definition_hash(metric: Metric) -> str:
     return hashlib.sha256(metric.definition.encode("utf-8")).hexdigest()[:12]
 
 
+# The convention the catalogue has carried since it was written: an entry no
+# business owner has confirmed says PLACEHOLDER in its definition text and
+# names `placeholder` as its owner. Both markers mean "nobody signed this off".
+PLACEHOLDER_MARKER = "PLACEHOLDER"
+PLACEHOLDER_OWNER = "placeholder"
+
+
+def is_placeholder(metric: Metric) -> bool:
+    """True when this metric definition has not been confirmed by a business owner.
+
+    The test is deterministic and reads data only, never a model: the
+    definition text contains ``PLACEHOLDER`` (in any case), or the owner is
+    literally ``placeholder``. Either marker alone is enough, because a
+    definition that still says PLACEHOLDER is unconfirmed whoever is named as
+    its owner, and an owner called ``placeholder`` has not accepted anything.
+
+    The catalogue carries both markers together, so the shipped file has
+    exactly three placeholders and one confirmed metric. A YAML comment is not
+    data: a ``# PLACEHOLDER`` note on a confirmed-looking line is invisible
+    here, which is why the markers are part of the values, not of the comments.
+    """
+    text = (metric.definition or "").upper()
+    owner = (metric.owner or "").strip().casefold()
+    return PLACEHOLDER_MARKER in text or owner == PLACEHOLDER_OWNER
+
+
 def _cache_value(value: object) -> object:
     if isinstance(value, datetime):
         return value.isoformat()

@@ -1,9 +1,9 @@
 """One permission boundary for every capability a role may run.
 
 A capability is an action the app can take on a person's behalf: ``query``
-answers a question, and a later capability (scheduled alerts) will add its own
-name here. A role holds a list of capability grants in ``config/users.yaml``,
-beside the table grants it already had.
+answers a question, ``alert`` drafts and confirms an alert definition. A role
+holds a list of capability grants in ``config/users.yaml``, beside the table
+grants it already had.
 
 Every capability asks the same two questions at the same place:
 
@@ -26,7 +26,10 @@ from src.models import User
 # The capability that answers a question. Add a name here only when the code
 # that runs it also ships, so a typo in users.yaml is refused at load time.
 QUERY = "query"
-KNOWN_CAPABILITIES = frozenset({QUERY})
+# The capability that drafts and confirms an alert definition, and that its
+# recipients must hold for a notification to reach them.
+ALERT = "alert"
+KNOWN_CAPABILITIES = frozenset({QUERY, ALERT})
 
 # Reasons a decision can be refused. They are also what the audit row records
 # in its error column, so keep them stable.

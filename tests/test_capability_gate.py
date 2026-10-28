@@ -14,7 +14,7 @@ import pytest
 import src.pipeline as pipeline
 from src.audit import AuditLog
 from src.auth import authenticate, load_directory
-from src.capabilities import QUERY, authorize
+from src.capabilities import ALERT, QUERY, authorize
 from src.config import ROOT, ConfigError
 from src.models import User
 from tests.test_pipeline import _Boom, _Off
@@ -69,9 +69,12 @@ def _write_users(tmp_path, body: str):
 def test_every_role_carries_the_query_capability():
     directory = load_directory(USERS)
     for role in ("analyst", "finance", "growth"):
-        assert directory.capabilities[role] == (QUERY,)
+        assert QUERY in directory.capabilities[role]
+    # `alert` is granted to analyst only, so a role without it stays testable.
+    assert directory.capabilities["analyst"] == (QUERY, ALERT)
+    assert ALERT not in directory.capabilities["finance"]
     analyst = authenticate("analyst", "analyst", USERS)
-    assert analyst is not None and analyst.capabilities == (QUERY,)
+    assert analyst is not None and analyst.capabilities == (QUERY, ALERT)
 
 
 def test_capability_grants_do_not_change_the_existing_table_grants():
@@ -186,8 +189,8 @@ def test_the_capability_is_answered_before_the_table():
 
 def test_an_unimplemented_capability_is_rejected_by_the_gate():
     analyst = User("analyst", "analyst", ("revenue",))
-    with pytest.raises(ValueError, match="alert"):
-        authorize(analyst, "alert")
+    with pytest.raises(ValueError, match="recipe"):
+        authorize(analyst, "recipe")
 
 
 # --- refusals are audited, once each --------------------------------------

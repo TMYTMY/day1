@@ -58,24 +58,21 @@ def _ensure_answer_cache(conn: sqlite3.Connection) -> None:
     _create_answer_cache(conn)
 
 
-def _ensure_metric_columns(conn: sqlite3.Connection) -> None:
-    """Add trace columns on databases created before the metric catalogue."""
-    present = {row["name"] for row in conn.execute("PRAGMA table_info(audit_events)")}
-    if "metric_id" not in present:
-        conn.execute("ALTER TABLE audit_events ADD COLUMN metric_id TEXT")
-    if "definition_hash" not in present:
-        conn.execute("ALTER TABLE audit_events ADD COLUMN definition_hash TEXT")
+def _add_event_columns(conn: sqlite3.Connection, *names: str) -> None:
+    """Add trace columns on databases created before them.
 
-
-def _ensure_source_column(conn: sqlite3.Connection) -> None:
-    """Add source_id. A failure leaves the old database readable."""
+    A failure leaves the old database readable: a missing column only costs
+    the trace, never a question. Every optional audit column is added here,
+    so a new field is one entry rather than another helper.
+    """
     present = {row["name"] for row in conn.execute("PRAGMA table_info(audit_events)")}
-    if "source_id" in present:
-        return
-    try:
-        conn.execute("ALTER TABLE audit_events ADD COLUMN source_id TEXT")
-    except sqlite3.Error:
-        return
+    for name in names:
+        if name in present:
+            continue
+        try:
+            conn.execute(f"ALTER TABLE audit_events ADD COLUMN {name} TEXT")
+        except sqlite3.Error:
+            continue
 
 
 @dataclass(frozen=True)
@@ -91,6 +88,17 @@ class AuditEvent:
     metric_id: str | None = None
     definition_hash: str | None = None
     source_id: str | None = None
+    # "question" for a capability run through the question pipeline,
+    # "capability_refusal" when the permission gate refused the run, and the
+    # action's own name for a future capability.
+    event_type: str = "question"
+    # The capability this event belongs to, e.g. "query".
+    capability: str | None = None
+
+
+# Columns added after the first audit_events table. Older files gain them on
+# open; readers check before selecting them.
+_OPTIONAL_EVENT_COLUMNS = ("metric_id", "definition_hash", "source_id", "event_type", "capability")
 
 
 class AuditLog:
@@ -139,8 +147,7 @@ class AuditLog:
                 )
                 """
             )
-            _ensure_metric_columns(conn)
-            _ensure_source_column(conn)
+            _add_event_columns(conn, *_OPTIONAL_EVENT_COLUMNS)
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path, timeout=5)
@@ -163,8 +170,8 @@ class AuditLog:
                 """
                 INSERT INTO audit_events (
                     ts, username, role, question, routed_tables, sql, status, row_count, error,
-                    metric_id, definition_hash, source_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    metric_id, definition_hash, source_id, event_type, capability
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     _stamp(),
@@ -179,16 +186,66 @@ class AuditLog:
                     (event.metric_id or "")[:200] or None,
                     (event.definition_hash or "")[:64] or None,
                     (event.source_id or "")[:200] or None,
+                    (event.event_type or "question")[:64],
+                    (event.capability or "")[:64] or None,
                 ),
             )
+
+    def record_event(
+        self,
+        *,
+        username: str,
+        role: str,
+        status: str,
+        event_type: str = "question",
+        capability: str | None = None,
+        question: str = "",
+        tables: tuple[str, ...] | list[str] = (),
+        sql: str | None = None,
+        row_count: int | None = None,
+        error: str | None = None,
+        metric_id: str | None = None,
+        definition_hash: str | None = None,
+        source_id: str | None = None,
+    ) -> None:
+        """Write one audit row. The one writer every capability shares.
+
+        The question pipeline passes ``event_type="question"`` and
+        ``capability="query"``; a refusal at the permission gate passes
+        ``event_type="capability_refusal"`` with the capability that was
+        refused. A future capability writes its own action name and needs no
+        new SQL. The roll-up columns keep their old meaning, so an existing
+        reader (the sidebar, a script) keeps working.
+        """
+        self.write(
+            AuditEvent(
+                username=username,
+                role=role,
+                question=question,
+                routed_tables=tuple(tables),
+                sql=sql,
+                status=status,
+                row_count=row_count,
+                error=error,
+                metric_id=metric_id,
+                definition_hash=definition_hash,
+                source_id=source_id,
+                event_type=event_type,
+                capability=capability,
+            )
+        )
 
     def recent(self, username: str, limit: int = 8) -> list[dict]:
         with self._session() as conn:
             names = {row["name"] for row in conn.execute("PRAGMA table_info(audit_events)")}
-            source = ", source_id" if "source_id" in names else ""
+            extra = "".join(
+                f", {name}"
+                for name in ("source_id", "event_type", "capability")
+                if name in names
+            )
             rows = conn.execute(
                 f"""
-                SELECT ts, question, status, routed_tables, row_count{source}
+                SELECT ts, question, status, routed_tables, row_count{extra}
                 FROM audit_events
                 WHERE username = ?
                 ORDER BY id DESC

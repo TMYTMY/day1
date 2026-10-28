@@ -241,25 +241,33 @@ def test_save_without_a_key_is_refused_on_the_page(monkeypatch, tmp_path):
 
 
 def test_a_refused_test_send_renders_the_hint(monkeypatch, tmp_path):
+    # Direction change (issue #29): this test used to send to
+    # "someone@example.test", an address the instance had never seen. That is
+    # exactly the relay the ticket removes, so the recipient is now the address
+    # this instance sends from — which is a known one — and the test still
+    # asserts what it was written for: a transport failure is rendered as a
+    # hint and audited as one outcome.
     at = _open_mail(monkeypatch, tmp_path, "owner", DAY1_SECRET_KEY=generate_key())
     at.selectbox(key="mail_provider").set_value("custom").run(timeout=60)
     at.text_input(key="mail_host").set_value("127.0.0.1")
     at.text_input(key="mail_port").set_value("9")
     at.selectbox(key="mail_tls").set_value("none")
     at.text_input(key="mail_from").set_value("day1@example.test")
-    at.text_input(key="mail_test_to").set_value("someone@example.test")
+    at.text_input(key="mail_test_to").set_value("day1-alerts@localhost")
     at = _operator(at)
     at = at.button(key="mail_test").click().run(timeout=60)
     page = _blob(at)
     assert "Nothing is listening" in page
     sent = [row for row in _events(tmp_path / "audit.db") if row["event_type"] == "mail_test_sent"]
     assert sent
-    assert "to=someone@example.test" in sent[-1]["question"]
+    assert "to=day1-alerts@localhost" in sent[-1]["question"]
     assert "outcome=failed" in sent[-1]["question"]
     assert SECRET not in (sent[-1]["question"] or "")
 
 
 def test_a_test_send_to_a_local_relay_renders_the_success(monkeypatch, tmp_path):
+    # Direction change (issue #29): the recipient is a known address now; see
+    # the note on the refused-send test above.
     from tests.test_mail_setup import _Relay
 
     at = _open_mail(monkeypatch, tmp_path, "owner", DAY1_SECRET_KEY=generate_key())
@@ -269,13 +277,13 @@ def test_a_test_send_to_a_local_relay_renders_the_success(monkeypatch, tmp_path)
         at.text_input(key="mail_port").set_value(str(relay.port))
         at.selectbox(key="mail_tls").set_value("none")
         at.text_input(key="mail_from").set_value("day1@example.test")
-        at.text_input(key="mail_test_to").set_value("someone@example.test")
+        at.text_input(key="mail_test_to").set_value("day1-alerts@localhost")
         at = _operator(at)
         at = at.button(key="mail_test").click().run(timeout=60)
-        assert "Delivered to someone@example.test" in _blob(at)
+        assert "Delivered to day1-alerts@localhost" in _blob(at)
         assert relay.messages
     sent = [row for row in _events(tmp_path / "audit.db") if row["event_type"] == "mail_test_sent"]
-    assert sent[-1]["question"] == "to=someone@example.test outcome=ok"
+    assert sent[-1]["question"] == "to=day1-alerts@localhost outcome=ok"
 
 
 def _raw(path) -> bytes:

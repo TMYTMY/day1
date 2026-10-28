@@ -22,6 +22,13 @@ Three rules shape the mail page, and they are all about who is at the keyboard:
    action writes exactly one audit row — its own event on success, a
    ``settings_refused`` row on a refusal or a failed write — and both password
    boxes are dropped from widget and session state before any handler runs.
+4. **A test send is not a relay, and it is bounded.** The message leaves the
+   company's authenticated mailbox, so its recipient must be an address this
+   instance already knows and the number of tries per instance is limited in the
+   instance database (see :mod:`src.send_safety`). The Alerts page carries the
+   other half of the same story: one line per definition saying whether its
+   deliveries are recorded, healthy, stale or failing — and saying so when there
+   are no records at all.
 """
 
 from __future__ import annotations
@@ -32,6 +39,7 @@ from dataclasses import replace
 
 import streamlit as st
 
+from src import send_safety
 from src.alert_cli import condition, resolution, window
 from src.alerts import (
     CONFIRMED,
@@ -481,13 +489,30 @@ def _send_test(
     sender: str,
     destination: str,
 ) -> None:
-    """Send one test message and record its outcome, whatever the transport does."""
+    """Send one test message and record its outcome, whatever the transport does.
+
+    A test message is sent from the company's authenticated mailbox, so it is
+    restricted to recipients this instance already knows and limited per
+    instance. Both checks happen here rather than in the page's submit handler,
+    because a handler is a caller: the rule belongs beside the send, so a second
+    caller of this function cannot skip it.
+    """
     if not _browser_writes_allowed(settings):
         _refuse(
             user,
             audit,
             question="refused to send a test message",
             message=BROWSER_SETTINGS_OFF,
+        )
+        return
+    recipient = (destination or "").strip()
+    refusal = send_safety.recipient_refusal(recipient, settings, operator=user)
+    if refusal is not None:
+        _refuse(
+            user,
+            audit,
+            question="refused to send a test message",
+            message=refusal.message,
         )
         return
     stored = snapshot["smtp_password"]
@@ -497,6 +522,33 @@ def _send_test(
             audit,
             question="refused to send a test message",
             message=stored.error,
+        )
+        return
+    limiter = send_safety.MailTestLimiter(settings.settings_path)
+    throttled = limiter.refusal()
+    if throttled is not None:
+        _refuse(
+            user,
+            audit,
+            question="refused to send a test message",
+            message=throttled.message,
+        )
+        return
+    try:
+        # Counted before the transport is opened: the thing being limited is how
+        # often this instance presents a credential to a provider, and a send
+        # that cannot be counted is one the limit cannot bound.
+        limiter.record(recipient=recipient)
+    except sqlite3.Error as exc:
+        _refuse(
+            user,
+            audit,
+            question="refused to send a test message",
+            message=(
+                "The test-send limit could not be recorded, so nothing was sent: "
+                f"{exc}"
+            ),
+            status="failed",
         )
         return
     # A blank box keeps the stored secret. The typed one is used once, never rendered.
@@ -511,7 +563,6 @@ def _send_test(
         smtp_starttls=tls == "starttls",
         smtp_ssl=tls == "ssl",
     )
-    recipient = (destination or "").strip()
     try:
         result = verify(trial, recipient, timeout=15)
         ok = result.ok
@@ -642,6 +693,12 @@ def render_mail_page(user: User, settings: Settings, audit: AuditLog) -> None:
     )
     st.caption(PRESETS[st.session_state["mail_provider"]].note)
     st.caption("Leave the password blank to keep the stored one. It is never shown again.")
+    st.caption(
+        send_safety.RECIPIENT_RULE
+        + " Test messages are limited to "
+        f"{send_safety.TEST_SEND_LIMIT} per instance per "
+        f"{int(send_safety.TEST_SEND_WINDOW_SECONDS // 60)} minutes."
+    )
     _source_lines(snapshot)
 
     with st.form("mail_settings_form", clear_on_submit=True):
@@ -1004,6 +1061,11 @@ def _render_alert_row(
     metric = _metric(service, definition.metric_id)
     decision = _readable(user, metric, service)
     visible = decision is None or decision.allowed
+    # Delivery health is about this instance's mail, not about the metric: it
+    # names a count of failures and a time, so it is shown on a restricted row
+    # too. Hiding it would hide the one line that says whether the alert this
+    # person is looking at could reach anybody.
+    delivery_line = send_safety.health_line(definition, settings)
     state = (
         definition.state
         if definition.state in {"confirmed", "paused", "superseded", "draft"}
@@ -1079,6 +1141,7 @@ def _render_alert_row(
             f"<span>Window</span><span>{html.escape(window(definition))}</span>"
             f"<span>Confirmed</span><span>{html.escape(resolution(definition))}</span>"
             f"<span>Recipients</span><span>{html.escape(recipients)}</span>"
+            f"<span>Delivery</span><span>{html.escape(delivery_line)}</span>"
             + (f"<span>Access</span><span>{html.escape(access)}</span>" if access else "")
             + "</div>",
             unsafe_allow_html=True,

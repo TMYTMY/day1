@@ -222,13 +222,17 @@ def test_each_submit_writes_exactly_one_row(monkeypatch, tmp_path):
     assert rows[-1]["status"] == "ok"
 
     before = len(rows)
-    at.text_input(key="mail_test_to").set_value("someone@example.test")
+    # Direction change (issue #29): the recipient used to be an arbitrary
+    # address; a test send may now only reach an address this instance knows,
+    # so it goes to the one it sends from. The assertion is unchanged: one
+    # submit, one row.
+    at.text_input(key="mail_test_to").set_value("day1-alerts@localhost")
     at.text_input(key="operator_secret").set_value(OPERATOR)
     at = at.button(key="mail_test").click().run(timeout=60)
     rows = _rows(tmp_path)
     assert len(rows) == before + 1
     assert rows[-1]["event_type"] == "mail_test_sent"
-    assert rows[-1]["question"].startswith("to=someone@example.test outcome=")
+    assert rows[-1]["question"].startswith("to=day1-alerts@localhost outcome=")
 
 
 def test_a_store_that_raises_is_audited_once_and_never_shows_a_traceback(

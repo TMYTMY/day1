@@ -20,6 +20,9 @@
   grain: [event_date, product, region, channel]
   # channel is not additive: a channel split is a different metric.
   additive_over: [event_date, product, region]
+  # The column a value is summed from. An alert definition needs one; a
+  # question does not, which is why the other entries in this file have none.
+  measure: revenue_usd
   definition: "Recognised revenue in USD, net of cancellations. Channel splits sum to the total." # PLACEHOLDER — 需由業務方確認
   owner: finance-reporting
   effective_from: 2026-06-15

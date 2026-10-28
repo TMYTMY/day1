@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass, fields
 from datetime import date, datetime
 from pathlib import Path
@@ -27,6 +28,15 @@ _FIELDS = (
     "exceptions",
 )
 
+# Fields a catalogue entry may carry but does not have to. ``measure`` is the
+# column an alert sums; a metric without one is still answerable by a question,
+# because a question can be answered in prose, and an alert cannot.
+_OPTIONAL_FIELDS = ("measure",)
+
+# A measure has to be a plain column name, because it is interpolated into the
+# one template SQL statement an alert runs. Anything else is not a name.
+_MEASURE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
 DEFAULT_METRICS = ROOT / "config" / "metrics.yaml"
 
 
@@ -43,6 +53,10 @@ class Metric:
     effective_from: date
     supersedes: str | None
     exceptions: str
+    # The column a value for this metric is summed from. Optional, because a
+    # question can be answered without one and an alert cannot: a metric with
+    # no measure is refused when an alert definition names it.
+    measure: str | None = None
 
 
 def load_metrics(path: Path | None = None) -> list[Metric]:
@@ -63,7 +77,7 @@ def load_metrics(path: Path | None = None) -> list[Metric]:
 def _parse(entry: object, seen: set[str]) -> Metric:
     if not isinstance(entry, dict):
         raise ConfigError("Each metric must be a mapping.")
-    unknown = sorted(set(entry) - set(_FIELDS))
+    unknown = sorted(set(entry) - set(_FIELDS) - set(_OPTIONAL_FIELDS))
     if unknown:
         raise ConfigError(f"Unknown metric fields: {', '.join(unknown)}.")
     missing = [name for name in _FIELDS if name not in entry]
@@ -79,6 +93,10 @@ def _parse(entry: object, seen: set[str]) -> Metric:
     if supersedes is not None:
         supersedes = _text(supersedes, "supersedes")
 
+    measure = entry.get("measure")
+    if measure is not None:
+        measure = _text(measure, "measure", allow_empty=True) or None
+
     return Metric(
         id=metric_id,
         title=_text(entry["title"], "title"),
@@ -91,6 +109,7 @@ def _parse(entry: object, seen: set[str]) -> Metric:
         effective_from=_as_date(entry["effective_from"]),
         supersedes=supersedes,
         exceptions=_text(entry["exceptions"], "exceptions", allow_empty=True),
+        measure=measure,
     )
 
 
@@ -218,6 +237,21 @@ def is_placeholder(metric: Metric) -> bool:
     text = (metric.definition or "").upper()
     owner = (metric.owner or "").strip().casefold()
     return PLACEHOLDER_MARKER in text or owner == PLACEHOLDER_OWNER
+
+
+def measure_column(metric: Metric) -> str | None:
+    """The column this metric's value is summed from, or None when it has none.
+
+    A catalogue entry that names no measure, or names something that is not a
+    plain column name, cannot be summed. An alert definition that names such a
+    metric is refused when it is written, rather than stored and found
+    unresolvable by a worker at three in the morning.
+    """
+    raw = metric.measure
+    if not isinstance(raw, str):
+        return None
+    name = raw.strip()
+    return name if _MEASURE_NAME.fullmatch(name) else None
 
 
 def _cache_value(value: object) -> object:

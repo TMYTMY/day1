@@ -247,6 +247,43 @@ def _deactivate(args: argparse.Namespace, *, settings: Settings, service: AlertS
     return EXIT_OK
 
 
+def _run_now(args: argparse.Namespace, *, settings: Settings, service: AlertService) -> int:
+    """Evaluate one definition the way the worker would, and say what happened."""
+    from src.worker import OUTCOME_FAILED, OUTCOME_REFUSED, Worker
+
+    actor = _sign_in(args.actor, settings)
+    record = service.definition(args.alert_id)
+    if record is None:
+        raise CliRefusal(
+            f"Alert definition #{args.alert_id} does not exist.", field="alert", reason=ALERT_UNKNOWN
+        )
+    if record.owner != actor.username:
+        raise CliRefusal(
+            "Only the owner of an alert definition can run it. "
+            f"The owner is {record.owner}.",
+            field="owner",
+            reason="not_owner",
+        )
+
+    outcomes = Worker.from_settings(settings).tick(only={args.alert_id})
+    if not outcomes:
+        raise CliRefusal(
+            f"Alert definition #{args.alert_id} is {record.state}, so it is not scheduled.",
+            field="state",
+            reason="state_not_run",
+        )
+
+    outcome = outcomes[0]
+    print(f"outcome: {outcome.outcome}")
+    print(f"fire key: {outcome.fire_key}")
+    if outcome.value is not None:
+        print(f"value: {outcome.value}")
+    print(outcome.message)
+    if outcome.outcome in (OUTCOME_REFUSED, OUTCOME_FAILED):
+        return EXIT_REFUSED
+    return EXIT_OK
+
+
 def _resume(args: argparse.Namespace, *, settings: Settings, service: AlertService) -> int:
     actor = _sign_in(args.actor, settings)
     result = _require(service.resume(args.alert_id, actor))
@@ -412,6 +449,19 @@ def build_parser() -> argparse.ArgumentParser:
     deactivate.add_argument("alert_id", type=int, metavar="ID")
     deactivate.add_argument("--as", dest="actor", required=True, metavar="USERNAME")
     deactivate.set_defaults(handler=_deactivate)
+
+    run_now = subparsers.add_parser(
+        "run-now",
+        help="evaluate one definition immediately, as its owner",
+        description=(
+            "Evaluate one definition now, exactly as the scheduled worker would. "
+            "At most one fire happens per window: running a window that has already "
+            "been evaluated reports a duplicate instead of sending twice."
+        ),
+    )
+    run_now.add_argument("alert_id", type=int, metavar="ID")
+    run_now.add_argument("--as", dest="actor", required=True, metavar="USERNAME")
+    run_now.set_defaults(handler=_run_now)
 
     resume = subparsers.add_parser("resume", help="make a deactivated definition live again")
     resume.add_argument("alert_id", type=int, metavar="ID")

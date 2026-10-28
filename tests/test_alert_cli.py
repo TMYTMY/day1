@@ -73,6 +73,7 @@ _METRICS = [
         "grain": ["event_date", "product", "region", "channel"],
         "additive_over": ["event_date", "product", "region"],
         "definition": "Recognised revenue in USD, net of cancellations.",
+        "measure": "revenue_usd",
         "owner": "finance-reporting",
         "effective_from": "2026-06-15",
         "supersedes": None,
@@ -86,6 +87,7 @@ _METRICS = [
         "grain": ["event_date", "platform", "country"],
         "additive_over": ["event_date", "platform"],
         "definition": "Distinct users with at least one session that day.",
+        "measure": "dau",
         "owner": "growth-lead",
         "effective_from": "2026-06-15",
         "supersedes": None,
@@ -531,3 +533,47 @@ def test_importing_the_command_does_not_import_the_web_app(tmp_path):
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "False"
+
+
+# --- run-now --------------------------------------------------------------
+
+
+def _confirmed(instance, capsys):
+    """Draft and confirm the happy path, returning the new id."""
+    code, out, err = instance.run(capsys, *_draft_args())
+    assert code == 0, err
+    alert_id = int(out.splitlines()[0].split(":")[-1])
+    code, out, err = instance.run(capsys, "confirm", alert_id, "--as", "alex")
+    assert code == 0, err
+    return alert_id
+
+
+def test_run_now_evaluates_one_definition_and_reports_the_outcome(instance, capsys):
+    alert_id = _confirmed(instance, capsys)
+
+    code, out, err = instance.run(capsys, "run-now", alert_id, "--as", "alex")
+    assert code == 0, err
+    assert "outcome:" in out
+    assert "fire key:" in out
+    assert f"alert:{alert_id}:" in out
+
+    # The window is now spent: a second run reports a duplicate and sends nothing.
+    code, out, err = instance.run(capsys, "run-now", alert_id, "--as", "alex")
+    assert code == 0, err
+    assert "duplicate" in out
+
+
+def test_run_now_by_a_non_owner_is_refused(instance, capsys):
+    alert_id = _confirmed(instance, capsys)
+
+    code, out, err = instance.run(capsys, "run-now", alert_id, "--as", "rita", password="rita")
+    assert code == 1
+    assert "refused:" in err
+    assert "owner" in err
+    assert "not_owner" in err
+
+
+def test_run_now_refuses_an_unknown_definition(instance, capsys):
+    code, out, err = instance.run(capsys, "run-now", 999, "--as", "alex")
+    assert code == 1
+    assert "alert_unknown" in err

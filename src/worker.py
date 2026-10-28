@@ -278,8 +278,12 @@ class Worker:
 
     # -- one tick ---------------------------------------------------------
 
-    def tick(self) -> list[FireOutcome]:
+    def tick(self, only: set[int] | None = None) -> list[FireOutcome]:
         """Consider every live or paused definition, once, and return the outcomes.
+
+        ``only`` restricts the pass to the given definition ids. The operator
+        command uses it for ``run-now``; a scheduled tick passes nothing and
+        therefore considers everything.
 
         A draft is not scheduled and a superseded definition has been retired,
         so neither is considered and neither is audited: an event per tick for
@@ -289,6 +293,8 @@ class Worker:
         outcomes: list[FireOutcome] = []
         for definition in self.service.definitions():
             if definition.state not in (CONFIRMED, PAUSED):
+                continue
+            if only is not None and definition.id not in only:
                 continue
             outcomes.append(self._consider(definition, now))
         return outcomes

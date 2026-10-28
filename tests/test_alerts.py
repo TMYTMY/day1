@@ -87,6 +87,8 @@ _TEMP_METRICS = [
         "effective_from": "2026-06-15",
         "supersedes": None,
         "exceptions": "Excludes internal test accounts.",
+        # An alert compares a number, so an alertable metric names its measure.
+        "measure": "revenue_usd",
     },
     {
         "id": "dau_confirmed",
@@ -100,6 +102,7 @@ _TEMP_METRICS = [
         "effective_from": "2026-06-15",
         "supersedes": None,
         "exceptions": "Excludes internal test accounts.",
+        "measure": "dau",
     },
 ]
 

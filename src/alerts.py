@@ -24,8 +24,9 @@ The store is the instance's own alert database (``Settings.alerts_path``). It
 will later hold the job table and the delivery log, so this module owns only
 the ``alert_definitions`` table today.
 
-What is deliberately absent: no scheduler, no worker, no mail, no CLI and no
-UI. ``AlertService.live()`` is the read a worker will start from.
+What is deliberately absent: no scheduler, no mail, no CLI and no UI. The
+worker that evaluates a live definition is ``src/worker.py``; this module only
+stores, validates and refuses.
 """
 
 from __future__ import annotations
@@ -38,11 +39,18 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+from src.alert_eval import (
+    ABOVE_ABSOLUTE,
+    BELOW_ABSOLUTE,
+    CHANGE_PCT_DOWN,
+    CHANGE_PCT_UP,
+    COMPARISONS,
+)
 from src.audit import AuditLog
 from src.auth import user_named
 from src.capabilities import ALERT, CAPABILITY_NOT_GRANTED, TABLE_NOT_ALLOWED, authorize
 from src.config import Settings
-from src.metrics import Metric, definition_hash, is_placeholder, load_metrics
+from src.metrics import Metric, definition_hash, is_placeholder, load_metrics, measure_column
 from src.models import User
 from src.routing import Catalog
 
@@ -53,15 +61,11 @@ DRAFT = "draft"
 CONFIRMED = "confirmed"
 PAUSED = "paused"
 SUPERSEDED = "superseded"
-STATES = frozenset({DRAFT, CONFIRMED, SUPERSEDED})
+STATES = frozenset({DRAFT, CONFIRMED, PAUSED, SUPERSEDED})
 
-# Comparison kinds. An unknown kind is refused at write time rather than
-# discovered by the worker.
-BELOW_ABSOLUTE = "below_absolute"
-ABOVE_ABSOLUTE = "above_absolute"
-CHANGE_PCT_DOWN = "change_pct_down"
-CHANGE_PCT_UP = "change_pct_up"
-COMPARISONS = (BELOW_ABSOLUTE, ABOVE_ABSOLUTE, CHANGE_PCT_DOWN, CHANGE_PCT_UP)
+# The comparison kinds live in ``src/alert_eval.py`` and are imported above:
+# the same four names decide a draft and decide a fire. An unknown kind is
+# refused at write time rather than discovered by the worker.
 
 # The evaluation cadence is daily today, so a cadence is a name rather than a
 # cron expression.
@@ -80,6 +84,7 @@ EVENT_REFUSED = "alert_refused"
 # stable: they are what a reviewer greps for.
 METRIC_UNKNOWN = "metric_unknown"
 METRIC_PLACEHOLDER = "metric_placeholder"
+METRIC_NO_MEASURE = "metric_no_measure"
 METRIC_NOT_READABLE = "metric_not_readable"
 COMPARISON_UNKNOWN = "comparison_unknown"
 CONSTANT_INVALID = "constant_invalid"
@@ -776,7 +781,14 @@ class AlertService:
         return None
 
     def _check_metric(self, metric: Metric) -> AlertResult | None:
-        """A placeholder metric has no authority, so no alert may rest on it."""
+        """A metric an alert cannot resolve has no authority as an alert.
+
+        Two markers disqualify a metric, and the placeholder test runs first so
+        an unconfirmed metric keeps the refusal it has always had. A metric
+        with no measure is refused for its own reason: an alert compares a
+        number, so a metric that names no column to sum would be a definition
+        that can only fail at fire time.
+        """
         if is_placeholder(metric):
             return AlertResult(
                 ok=False,
@@ -786,6 +798,16 @@ class AlertService:
                 ),
                 field="metric",
                 reason=METRIC_PLACEHOLDER,
+            )
+        if measure_column(metric) is None:
+            return AlertResult(
+                ok=False,
+                message=(
+                    f"The metric {metric.title} names no measure to sum, "
+                    "so no alert definition can be built on it."
+                ),
+                field="measure",
+                reason=METRIC_NO_MEASURE,
             )
         return None
 

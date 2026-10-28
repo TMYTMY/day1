@@ -201,6 +201,8 @@ The flags are the point: every label ships `reviewed: false`, and the harness pr
 | `EMBEDDING_MODEL` | Embedding model id when the provider is `openrouter`. Default `openai/text-embedding-3-small`. |
 | `EMBEDDING_API_KEY` | Key for the embeddings call. Falls back to `OPENROUTER_API_KEY` when the provider is `openrouter`. |
 | `KNOWLEDGE_PATH` | On-disk index directory. Default `data/knowledge`. |
+| `ALERTS_PATH` | The instance's alert database: definitions and fires. Default `data/alerts.db`. Two instances must never share it. |
+| `MAX_ALERT_WINDOW_DAYS` | The longest window an alert definition may name, in days. Default 365. A longer window is refused with this number in the message; it is never clamped. |
 | `SEED_END` | Last date in the seeded demo window (`YYYY-MM-DD`). Default: three days before today, so the demo data does not age. The window is 119 days long and the file rebuilds when the date changes. |
 
 The API key and database password are read from the environment inside the server process. They are not written into the prompt, the page, or the export.
@@ -240,6 +242,59 @@ Results wider than the preview are truncated on screen. CSV and HTML download th
 
 Each question is appended to the audit database with the user, role, capability, event type, tables, SQL, status, and row count. One writer on the audit store (`AuditLog.record_event`) builds the row, so every outcome — ok, clarify, denied, blocked, failed — writes exactly one row, and a capability that lands later writes the same shape.
 
+## Alerts: the worker
+
+An alert definition is data a person confirmed (`src/alerts.py`). Nothing runs it inside the web app: the worker is a separate command, one tick per invocation, so cron or systemd owns the schedule.
+
+```bash
+python -m src.worker                          # one tick, then exit
+python -m src.worker --loop --interval 300    # a long-running process instead
+```
+
+A tick considers every confirmed definition and every paused one, and writes exactly one audit event per definition it considered, whatever happened: `alert_fired`, `alert_not_fired`, `alert_insufficient_data`, `alert_duplicate`, `alert_skipped` (paused), `alert_run_refused`, `alert_failed`. A draft and a superseded definition are not considered and not audited, because neither is scheduled.
+
+A fire is identified by a fire key — the definition's row id plus the resolved window end — and that key carries a `UNIQUE` constraint in the instance's alert database (`ALERTS_PATH`). A restart, a double launch or two overlapping ticks therefore cannot evaluate the same window twice: the second claim loses the insert, records `alert_duplicate`, and runs no SQL. The window ends on the last complete day before the fire date, so two ticks on the same day before and after the definition's local time are two periods, while two ticks inside one period are one.
+
+One fire runs one statement — the metric's `measure` summed over the window — through the same SELECT allowlist and the same read-only connection as a asked question. There is no model call and no network access in this path (see `docs/adr/0003-model-authors-definitions-not-execution.md`). The owner's capability and table grants are re-checked before that statement; a definition whose owner may no longer read its metric is refused and audited rather than executed on their behalf.
+
+A metric with no `measure` cannot be alerted on: `src/alerts.py` refuses the draft with `metric_no_measure`, because an alert compares a number and a definition with nothing to sum could only fail at fire time. `revenue_by_product` names `revenue_usd`; the placeholder metrics name nothing and are refused as placeholders before the measure is considered.
+
+Delivery is a later capability (#21). A tick writes an audit row and a fire row and returns one outcome per definition, carrying the definition (metric, comparison, constant, recipients), the fire key, the window, the value, the previous value and the verdict. Nothing is sent.
+
+Cron:
+
+```cron
+*/15 * * * * cd /srv/day1 && .venv/bin/python -m src.worker >> /var/log/day1-worker.log 2>&1
+```
+
+systemd, as a oneshot service with a timer:
+
+```ini
+# /etc/systemd/system/day1-worker.service
+[Unit]
+Description=Day 1 alert worker (one tick)
+
+[Service]
+Type=oneshot
+WorkingDirectory=/srv/day1
+ExecStart=/srv/day1/.venv/bin/python -m src.worker
+```
+
+```ini
+# /etc/systemd/system/day1-worker.timer
+[Unit]
+Description=Run the Day 1 alert worker every 15 minutes
+
+[Timer]
+OnCalendar=*:0/15
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+The exit code is 0 when the tick ran, and 1 when a definition was refused or failed to evaluate, so cron and systemd surface the trouble instead of swallowing it.
+
 ## Swap in Postgres or Athena
 
 `src/db/sqlite.py` is the running adapter. `src/db/postgres.py` and `src/db/athena.py` are the seams: implement `get_schema`, `row_count`, and `execute_select` with a read-only role, then set `DB_BACKEND`. The prompt dialect and the SQL parser follow the adapter (`sqlite`, `postgres`, or `presto`). Keep the guard in front of `execute_select`. Do not put the connection string or password in the prompt.
@@ -251,7 +306,7 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-The tests cover routing, the role map, the capability gate and its refusals, the SELECT allowlist, blocked writes, CSV/HTML export, the revenue, DAU, unknown-topic, and permission paths, and the knowledge base (upload, search, delete, and notes that do not replace routing). The retrieval harness, the label review gate, the note ablation, the seeded window, and the answer-cache identity have their own tests. Nothing in the suite asserts a retrieval score — the numbers above are measured by the script, so a regression shows up as a number that moved, not as a test that was quietly loosened.
+The tests cover routing, the role map, the capability gate and its refusals, the SELECT allowlist, blocked writes, CSV/HTML export, the revenue, DAU, unknown-topic, and permission paths, the knowledge base (upload, search, delete, and notes that do not replace routing), alert definitions with their refusals, and the alert worker (the comparison, the fire key under a restart and a race, skipped paused definitions, and one audit event per definition considered). The retrieval harness, the label review gate, the note ablation, the seeded window, and the answer-cache identity have their own tests. Nothing in the suite asserts a retrieval score — the numbers above are measured by the script, so a regression shows up as a number that moved, not as a test that was quietly loosened.
 
 ## Copyright
 

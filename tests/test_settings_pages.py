@@ -219,6 +219,51 @@ def test_a_test_send_to_a_local_relay_renders_the_success(monkeypatch, tmp_path)
     assert sent[-1]["question"] == "to=someone@example.test outcome=ok"
 
 
+def _raw(path) -> bytes:
+    blob = bytearray()
+    if path.exists():
+        blob += path.read_bytes()
+    for suffix in ("-wal", "-shm"):
+        side = path.with_name(path.name + suffix)
+        if side.exists():
+            blob += side.read_bytes()
+    return bytes(blob)
+
+
+def test_a_known_password_never_appears_in_the_store_the_audit_log_or_the_page(monkeypatch, tmp_path):
+    """The password is written through the page and then grepped for.
+
+    Mutation: storing the password as plaintext, or pre-filling the password
+    box from the store, turns this test red.
+    """
+    key = generate_key()
+    at = _open_mail(monkeypatch, tmp_path, "owner", DAY1_SECRET_KEY=key)
+    at.selectbox(key="mail_provider").set_value("custom").run(timeout=60)
+    at.text_input(key="mail_host").set_value("smtp.example.com")
+    at.text_input(key="mail_port").set_value("587")
+    at.text_input(key="mail_user").set_value("owner@example.com")
+    at.text_input(key="mail_from").set_value("owner@example.com")
+    at.text_input(key="mail_password").set_value(SECRET)
+    at = at.button(key="mail_save").click().run(timeout=60)
+
+    assert SECRET not in _blob(at)
+    assert at.text_input(key="mail_password").value in ("", None)
+    for widget in at.text_input:
+        assert SECRET not in str(widget.value or "")
+
+    assert SECRET.encode() not in _raw(tmp_path / "instance.db")
+    assert SECRET.encode() not in _raw(tmp_path / "audit.db")
+    assert b"9912" in _raw(tmp_path / "instance.db")
+
+    again = _open_mail(monkeypatch, tmp_path, "owner", DAY1_SECRET_KEY=key)
+    assert again.text_input(key="mail_password").value in ("", None)
+    rendered = _blob(again)
+    assert SECRET not in rendered
+    assert "9912" in rendered
+    assert "source: database" in rendered
+
+
+
 _DIRECTORY = """
 roles:
   analyst:

@@ -125,7 +125,7 @@ A few June grain keys (`event_date`, `product`, `region`, `channel`) were ingest
 caddy reverse-proxy --from :8080 --to 127.0.0.1:47221
 ```
 
-The proxy terminates TLS and decides who may connect. The app keeps its role check, the SELECT allowlist, and the read-only database connection, but none of those replace transport security or network access control.
+The proxy terminates TLS and decides who may connect. The app keeps its role check, the SELECT allowlist, and the read-only database connection, but none of those replace transport security or network access control. Day 1 still signs in with a demo password. Settings is not a substitute for authentication on an instance exposed to the public.
 
 ## Sign in
 
@@ -133,11 +133,14 @@ The proxy terminates TLS and decides who may connect. The app keeps its role che
 
 | Username | Password | Role | Tables | Capabilities |
 | --- | --- | --- | --- | --- |
-| analyst | analyst | analyst | revenue, dau | query |
+| analyst | analyst | analyst | revenue, dau | query, alert |
 | finance | finance | finance | revenue | query |
 | growth | growth | growth | dau | query |
+| owner | owner | owner | (none) | admin |
 
-A role holds two grants. The table grant says what an action may read; the capability grant says which actions the role may run (`query` answers a question, and a second capability will add its own name). Both are checked at one boundary in `src/capabilities.py`, and neither replaces the other: a role with `query` but no matching table is refused, and a role with the table but no `query` is refused before routing. A role with no `capabilities` key implies `[query]`, so an older `users.yaml` keeps working. See `docs/migration/0001-capability-grants.md`. Refusals name the capability or the table and the role, and are appended to the audit log like any other outcome.
+A role holds two grants. The table grant says what an action may read; the capability grant says which actions the role may run (`query` answers a question, `alert` drafts and confirms an alert definition, `admin` opens Settings). Both are checked at one boundary in `src/capabilities.py`, and neither replaces the other: a role with `query` but no matching table is refused, and a role with the table but no `query` is refused before routing. A role with no `capabilities` key implies `[query]`, so an older `users.yaml` keeps working. See `docs/migration/0001-capability-grants.md`. Refusals name the capability or the table and the role, and are appended to the audit log like any other outcome.
+
+The owner role is the demo account for Settings. Its table list is empty: administering the instance is not reading its data. Day 1 still signs in with a demo password. Settings is not a substitute for authentication on an instance exposed to the public.
 
 ## Try these
 
@@ -202,8 +205,10 @@ The flags are the point: every label ships `reviewed: false`, and the harness pr
 | `EMBEDDING_API_KEY` | Key for the embeddings call. Falls back to `OPENROUTER_API_KEY` when the provider is `openrouter`. |
 | `KNOWLEDGE_PATH` | On-disk index directory. Default `data/knowledge`. |
 | `ALERTS_PATH` | The instance's alert database: definitions and fires. Default `data/alerts.db`. Two instances must never share it. |
+| `SETTINGS_PATH` | Instance settings database. Default `data/instance.db`. Encrypted mail settings live here and win over `SMTP_*` when a value is present. |
+| `DAY1_SECRET_KEY` | Fernet key for that database. Create it with `python -m src.mail_setup --init-key` (mode 600, other lines untouched). Without it the Settings page refuses to save and does not store a password in the clear. A wrong key is an error, not a fallback to `SMTP_PASSWORD`. |
 | `MAX_ALERT_WINDOW_DAYS` | The longest window an alert definition may name, in days. Default 365. A longer window is refused with this number in the message; it is never clamped. |
-| `SMTP_HOST` | The mail host a fire is delivered through. Unset means the worker refuses to start: nothing is evaluated and dropped. |
+| `SMTP_HOST` | The mail host a fire is delivered through when the settings database has no host. Unset, and no database host, means the worker refuses to start: nothing is evaluated and dropped. |
 | `SMTP_PORT` | Submission port. Default 587. |
 | `SMTP_USER`, `SMTP_PASSWORD` | Credentials for the relay. Optional: a local relay that needs none is left alone. |
 | `SMTP_FROM` | The from-address on a notification. Defaults to `SMTP_USER` when that is an address, then to `day1-alerts@localhost`. |
@@ -271,6 +276,14 @@ python -m src.mail_setup --check --to you@example.com
 Port 587 uses STARTTLS; port 465 uses implicit TLS (`SMTP_SSL=true`, which turns
 STARTTLS off). The two are alternatives, and the settings layer refuses to have
 both.
+
+The same presets are on **Mail settings** in the sidebar, and **Alerts** lists
+every definition. Both pages require the `admin` capability (the demo `owner`
+account). The page writes the encrypted settings database; a value there wins
+over this file, and a blank password keeps the stored one. `python -m src.mail_setup --init-key`
+creates `DAY1_SECRET_KEY` when `.env` does not already hold one. Day 1 still
+signs in with a demo password. Settings is not a substitute for authentication
+on an instance exposed to the public.
 
 ## Alerts: the worker
 
@@ -349,7 +362,7 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-The tests cover routing, the role map, the capability gate and its refusals, the SELECT allowlist, blocked writes, CSV/HTML export, the revenue, DAU, unknown-topic, and permission paths, the knowledge base (upload, search, delete, and notes that do not replace routing), alert definitions with their refusals, and the alert worker (the comparison, the fire key under a restart and a race, skipped paused definitions, one audit event per definition considered). Notification delivery has its own tests: the composed email, the fire-time recipient re-check being the one that skips a recipient (with the others still mailed), an all-blocked fire recorded as suppressed with nothing sent, three failed attempts ending in one owner notification, a duplicate tick sending nothing, and a delivery that runs with every socket function replaced so a regression is an error rather than a real connection. The retrieval harness, the label review gate, the note ablation, the seeded window, and the answer-cache identity have their own tests. Nothing in the suite asserts a retrieval score — the numbers above are measured by the script, so a regression shows up as a number that moved, not as a test that was quietly loosened.
+The tests cover routing, the role map, the capability gate and its refusals, the SELECT allowlist, blocked writes, CSV/HTML export, the revenue, DAU, unknown-topic, and permission paths, the knowledge base (upload, search, delete, and notes that do not replace routing), alert definitions with their refusals, and the alert worker (the comparison, the fire key under a restart and a race, skipped paused definitions, one audit event per definition considered). Notification delivery has its own tests: the composed email, the fire-time recipient re-check being the one that skips a recipient (with the others still mailed), an all-blocked fire recorded as suppressed with nothing sent, three failed attempts ending in one owner notification, a duplicate tick sending nothing, and a delivery that runs with every socket function replaced so a regression is an error rather than a real connection. The Settings pages are driven through AppTest: the mail form, the encrypted store, the admin refusal, and the alert list. A known password is grepped out of the settings database, the audit database, and the rendered page. The retrieval harness, the label review gate, the note ablation, the seeded window, and the answer-cache identity have their own tests. Nothing in the suite asserts a retrieval score — the numbers above are measured by the script, so a regression shows up as a number that moved, not as a test that was quietly loosened.
 
 ## Copyright
 

@@ -13,6 +13,10 @@ ROOT = Path(__file__).resolve().parents[1]
 # Wall-clock limit on one statement, in milliseconds. 0 disables the limit.
 DEFAULT_SQL_TIMEOUT_MS = 5000
 
+# The longest window an alert definition may name, in days. A draft beyond it
+# is refused with this number in the message; it is never clamped.
+DEFAULT_MAX_ALERT_WINDOW_DAYS = 365
+
 
 class ConfigError(Exception):
     """The app cannot start because a config file or env value is invalid."""
@@ -56,6 +60,11 @@ class Settings:
     sources_dir: Path = field(default_factory=lambda: ROOT / "config" / "sources")
     sources_db: Path = field(default_factory=lambda: ROOT / "data" / "sources.sqlite")
     sources_staging_dir: Path = field(default_factory=lambda: ROOT / "data" / "staging")
+    # The instance's own alert data. The file holds alert definitions today and
+    # will hold the job table and the delivery log, so it is named for the data
+    # rather than for one table in it.
+    alerts_path: Path = field(default_factory=lambda: ROOT / "data" / "alerts.db")
+    max_alert_window_days: int = DEFAULT_MAX_ALERT_WINDOW_DAYS
 
     def __repr__(self) -> str:
         key_state = "set" if self.openrouter_api_key else "unset"
@@ -113,6 +122,14 @@ def load_settings() -> Settings:
         raise ConfigError("SQL_TIMEOUT_MS must be an integer.") from exc
     if sql_timeout_ms < 0:
         raise ConfigError("SQL_TIMEOUT_MS must be zero or greater.")
+    try:
+        max_alert_window_days = int(
+            os.environ.get("MAX_ALERT_WINDOW_DAYS", str(DEFAULT_MAX_ALERT_WINDOW_DAYS))
+        )
+    except ValueError as exc:
+        raise ConfigError("MAX_ALERT_WINDOW_DAYS must be an integer.") from exc
+    if max_alert_window_days < 1:
+        raise ConfigError("MAX_ALERT_WINDOW_DAYS must be at least 1 day.")
     return Settings(
         db_backend=backend,
         db_path=_resolve(os.environ.get("DB_PATH", ""), "data/demo.db"),
@@ -145,4 +162,6 @@ def load_settings() -> Settings:
         sources_dir=_resolve(os.environ.get("SOURCES_DIR", ""), "config/sources"),
         sources_db=_resolve(os.environ.get("SOURCES_DB", ""), "data/sources.sqlite"),
         sources_staging_dir=_resolve(os.environ.get("SOURCES_STAGING_DIR", ""), "data/staging"),
+        alerts_path=_resolve(os.environ.get("ALERTS_PATH", ""), "data/alerts.db"),
+        max_alert_window_days=max_alert_window_days,
     )

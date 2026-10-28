@@ -112,3 +112,23 @@ def authenticate(username: str, password: str, path: Path) -> User | None:
         allowed_tables=directory.roles[account.role],
         capabilities=directory.capabilities[account.role],
     )
+
+
+def user_named(username: str, path: Path) -> User | None:
+    """Return the user a directory knows by that name, with no password check.
+
+    A recipient of an alert definition is identified, not authenticated: the
+    owner names them, and the definition only needs their grants to decide
+    whether a notification may reach them. An unknown name returns None, so the
+    caller refuses it rather than inventing a person.
+    """
+    directory = load_directory(path)
+    account = directory.accounts.get((username or "").strip())
+    if account is None:
+        return None
+    return User(
+        username=account.username,
+        role=account.role,
+        allowed_tables=directory.roles[account.role],
+        capabilities=directory.capabilities[account.role],
+    )

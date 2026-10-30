@@ -120,7 +120,7 @@ def render_connections_page(user: User, settings: Settings, audit: AuditLog) -> 
     _purge_secret()
     _sidebar(user)
     st.markdown('<p class="d1-kicker">Connections</p>', unsafe_allow_html=True)
-    st.title("Connections")
+    st.title("資料庫連線")
     st.caption(
         "SQLite file only. The environment database stays in use until you enable "
         "a connection here. Disable it to fall back. Postgres is not configured on this page."
@@ -170,12 +170,17 @@ def render_connections_page(user: User, settings: Settings, audit: AuditLog) -> 
         key=_SECRET_KEY,
         help="Asked again for Test, Enable, and Disable. It is not a database password.",
     )
-    test_col, enable_col, disable_col = st.columns(3)
-    if test_col.button("Test connection", key="connection_test", width="stretch"):
+    test_col, enable_col = st.columns(2)
+    if test_col.button("Test connection", key="connection_test", type="secondary"):
         _on_test(user, settings, audit, store)
-    if enable_col.button("Enable", key="connection_enable", width="stretch"):
+    if enable_col.button("Enable", key="connection_enable", type="primary"):
         _on_enable(user, settings, audit, store)
-    if disable_col.button("Disable", key="connection_disable", width="stretch"):
+    st.markdown('<div class="d1-sep"></div>', unsafe_allow_html=True)
+    st.markdown(
+        '<p class="d1-danger">Disable returns questions to the environment database.</p>',
+        unsafe_allow_html=True,
+    )
+    if st.button("Disable", key="connection_disable", type="secondary"):
         _on_disable(user, settings, audit, store)
 
 

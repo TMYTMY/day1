@@ -7,6 +7,7 @@ The admin role is the one that approves or rejects.
 
 from __future__ import annotations
 
+import html
 import sqlite3
 
 import streamlit as st
@@ -21,6 +22,14 @@ from src.knowledge.store import (
     KnowledgeStore,
 )
 from src.models import User
+
+# Same pill colors as the alert list. Approved uses the confirmed green.
+# Rejected uses the danger red. The word on the pill stays the approval.
+_APPROVAL_PILL = {
+    "draft": "d1-state-draft",
+    "approved": "d1-state-confirmed",
+    "rejected": "d1-state-rejected",
+}
 
 
 def render_knowledge_page(
@@ -67,47 +76,129 @@ def render_knowledge_page(
     if not documents:
         st.info("No documents yet. A glossary or DDL file will show up here after it is indexed.")
         return
-    columns = st.columns(2)
-    for index, document in enumerate(documents):
-        with columns[index % 2]:
-            with st.container(border=True):
-                st.markdown(f"**{document.filename}**")
-                when = document.updated_at.replace("T", " ").replace("Z", " UTC")
-                st.caption(
-                    f"{document.extension.upper()} · {document.chunk_count} chunks · Updated {when}"
-                )
-                st.caption(f"Approval · {document.approval}")
-                if document.extension == "png" or document.skip_reason == "non-indexed":
-                    st.markdown(
-                        '<span class="d1-state">non-indexed</span>',
-                        unsafe_allow_html=True,
-                    )
-                elif document.extension in STORED_EXTENSIONS and document.skip_reason:
-                    st.caption(document.skip_reason)
-                if document.legacy:
-                    st.caption("Unowned · re-index to attach it to your role.")
-                else:
-                    st.caption(f"Uploaded by {document.owner or 'unknown'} ({document.owner_role})")
-                if document.truncated:
-                    st.caption("Indexed the first 200 chunks.")
-                if document.indexed and document.embedding_id != current_embedding:
-                    st.caption("Re-index this file so it matches the current embedding provider.")
-                left, right = st.columns(2)
-                if left.button("Re-index", key=f"reindex-{document.id}", width="stretch"):
-                    _reindex(store, document.id, user)
-                if document.legacy or document.owner == user.username:
-                    if right.button("Delete", key=f"delete-{document.id}", width="stretch"):
-                        _delete(store, document.id, user)
-                else:
-                    right.caption("Only the uploader can delete.")
-                if reviewer:
-                    approve, reject = st.columns(2)
-                    if approve.button("Approve", key=f"approve-{document.id}", width="stretch"):
-                        _set_approval(store, document.id, "approved", user, audit)
-                    if reject.button("Reject", key=f"reject-{document.id}", width="stretch"):
-                        _set_approval(store, document.id, "rejected", user, audit)
-                else:
-                    st.caption("Only the owner can approve or reject.")
+    for document in documents:
+        with st.container(border=True, key=f"kb_card_{document.id}"):
+            _card(
+                store,
+                document,
+                user,
+                audit,
+                reviewer=reviewer,
+                current_embedding=current_embedding,
+            )
+
+
+def _card(
+    store: KnowledgeStore,
+    document: KnowledgeDocument,
+    user: User,
+    audit: AuditLog | None,
+    *,
+    reviewer: bool,
+    current_embedding: str,
+) -> None:
+    """One file: a state pill, a detail well, then a single column of actions.
+
+    Delete and Reject arm a second step, the way Clear mail does. The actions
+    stay in one column so a narrow card does not turn into a row of four buttons.
+    """
+    when = document.updated_at.replace("T", " ").replace("Z", " UTC")
+    pill = _APPROVAL_PILL.get(document.approval, "d1-state-draft")
+    badges = (
+        f'<span class="d1-state {pill}">{html.escape(document.approval)}</span>'
+    )
+    if document.extension == "png" or document.skip_reason == "non-indexed":
+        badges += ' <span class="d1-state">non-indexed</span>'
+    st.markdown(badges, unsafe_allow_html=True)
+    st.markdown(f"**{html.escape(document.filename)}**")
+    details = [
+        ("Type", document.extension.upper()),
+        ("Chunks", str(document.chunk_count)),
+        ("Updated", when),
+    ]
+    if document.legacy:
+        details.append(("Owner", "Unowned · re-index to attach it to your role."))
+    else:
+        details.append(
+            ("Uploaded by", f"{document.owner or 'unknown'} ({document.owner_role})")
+        )
+    if document.extension in STORED_EXTENSIONS and document.skip_reason and document.skip_reason != "non-indexed":
+        details.append(("Skip", document.skip_reason))
+    if document.truncated:
+        details.append(("Index", "Indexed the first 200 chunks."))
+    if document.indexed and document.embedding_id != current_embedding:
+        details.append(("Embeddings", "Re-index so it matches the current provider."))
+    cells = "".join(
+        f"<span>{html.escape(label)}</span><span>{html.escape(value)}</span>"
+        for label, value in details
+    )
+    st.markdown(f'<div class="d1-alert-well">{cells}</div>', unsafe_allow_html=True)
+
+    if st.button("Re-index", key=f"reindex-{document.id}", type="secondary"):
+        _reindex(store, document.id, user)
+    if reviewer:
+        if st.button("Approve", key=f"approve-{document.id}", type="primary"):
+            _set_approval(store, document.id, "approved", user, audit)
+    else:
+        st.caption("Only the owner can approve or reject.")
+    if document.legacy or document.owner == user.username:
+        _delete_control(store, document, user)
+    else:
+        st.caption("Only the uploader can delete.")
+    if reviewer:
+        _reject_control(store, document, user, audit)
+
+
+def _confirming(kind: str, document_id: str) -> bool:
+    return st.session_state.get("kb_confirm") == (kind, document_id)
+
+
+def _arm(kind: str, document_id: str) -> None:
+    st.session_state["kb_confirm"] = (kind, document_id)
+    st.rerun()
+
+
+def _keep(document_id: str) -> None:
+    if st.session_state.get("kb_confirm", (None, None))[1] == document_id:
+        st.session_state.pop("kb_confirm", None)
+    st.rerun()
+
+
+def _delete_control(store: KnowledgeStore, document: KnowledgeDocument, user: User) -> None:
+    name = document.filename
+    if _confirming("delete", document.id):
+        st.markdown(
+            f'<p class="d1-danger"><strong>Delete {html.escape(name)}?</strong></p>',
+            unsafe_allow_html=True,
+        )
+        if st.button(f"Delete {name}", key=f"kb-delete-confirm-{document.id}", type="secondary"):
+            _delete(store, document.id, user)
+        if st.button(f"Keep {name}", key=f"kb-keep-delete-{document.id}", type="tertiary"):
+            _keep(document.id)
+        return
+    if st.button("Delete", key=f"kb-delete-{document.id}", type="secondary"):
+        _arm("delete", document.id)
+
+
+def _reject_control(
+    store: KnowledgeStore,
+    document: KnowledgeDocument,
+    user: User,
+    audit: AuditLog | None,
+) -> None:
+    name = document.filename
+    if _confirming("reject", document.id):
+        st.markdown(
+            f'<p class="d1-danger"><strong>Reject {html.escape(name)}?</strong></p>',
+            unsafe_allow_html=True,
+        )
+        if st.button(f"Reject {name}", key=f"kb-reject-confirm-{document.id}", type="secondary"):
+            _set_approval(store, document.id, "rejected", user, audit)
+        if st.button(f"Keep {name}", key=f"kb-keep-reject-{document.id}", type="tertiary"):
+            _keep(document.id)
+        return
+    if st.button("Reject", key=f"kb-reject-{document.id}", type="secondary"):
+        _arm("reject", document.id)
 
 
 def _metrics(store: KnowledgeStore, documents: list[KnowledgeDocument]) -> None:
@@ -186,6 +277,7 @@ def _set_approval(
         except sqlite3.Error:
             st.caption("The approval was saved, and the usage log was not.")
     st.session_state.kb_notice = f"{document.filename} is {approval}."
+    st.session_state.pop("kb_confirm", None)
     st.rerun()
 
 
@@ -195,4 +287,5 @@ def _delete(store: KnowledgeStore, document_id: str, user: User) -> None:
     except KnowledgeError as exc:
         st.error(str(exc))
         return
+    st.session_state.pop("kb_confirm", None)
     st.rerun()

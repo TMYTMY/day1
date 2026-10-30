@@ -92,7 +92,10 @@ def _css() -> None:
             margin: 32px 0 20px;
           }
           .st-key-mail_clear button,
-          .st-key-mail_clear_confirm button {
+          .st-key-mail_clear_confirm button,
+          .st-key-connection_disable button,
+          [class*="st-key-kb-delete-"] button,
+          [class*="st-key-kb-reject-"] button {
             background: transparent !important;
             color: var(--d1-danger) !important;
             border: 1px solid var(--d1-danger) !important;
@@ -115,6 +118,7 @@ def _css() -> None:
           }
           .d1-state-confirmed { color: #0E6B56; }
           .d1-state-paused { color: #8A5A12; }
+          .d1-state-rejected { color: var(--d1-danger); }
           .d1-state-superseded, .d1-state-draft { color: #5C6562; }
           .d1-alert-well {
             display: grid;
@@ -495,6 +499,7 @@ def _sign_out() -> None:
     st.session_state.pop("nav_page", None)
     st.session_state.pop("kb_seen_ids", None)
     st.session_state.pop("kb_notice", None)
+    st.session_state.pop("kb_confirm", None)
     st.session_state.pop("staged_seen_ids", None)
     st.rerun()
 
@@ -503,7 +508,7 @@ def _page_choice() -> str:
     labels = {
         "ask": "Ask",
         "knowledge": "知識庫",
-        "connections": "Connections",
+        "connections": "資料庫連線",
         "sources": "Data sources",
         "mail": "Mail settings",
         "alerts": "Alerts",

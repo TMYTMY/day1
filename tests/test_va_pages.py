@@ -161,7 +161,9 @@ def test_owner_approves_and_rejects_on_the_knowledge_page(monkeypatch, tmp_path)
     analyst.file_uploader[0].upload("glossary.md", glossary, "text/markdown").run(timeout=60)
     page = _blob(analyst)
     assert "glossary.md" in page
-    assert "Approval · draft" in page
+    assert "d1-state-draft" in page
+    assert ">draft<" in page
+    assert "Approval ·" not in page
     assert "chunks" in page
     assert not any(button.label == "Approve" for button in analyst.button)
     assert "Only the owner can approve or reject." in page
@@ -172,11 +174,20 @@ def test_owner_approves_and_rejects_on_the_knowledge_page(monkeypatch, tmp_path)
     assert "glossary.md" in _blob(owner)
     approve = next(button for button in owner.button if button.label == "Approve")
     approve.click().run(timeout=60)
-    assert "Approval · approved" in _blob(owner)
+    approved = _blob(owner)
+    assert "d1-state-confirmed" in approved
+    assert ">approved<" in approved
 
     reject = next(button for button in owner.button if button.label == "Reject")
     reject.click().run(timeout=60)
-    assert "Approval · rejected" in _blob(owner)
+    assert "Reject glossary.md?" in _blob(owner)
+    assert "d1-state-confirmed" in _blob(owner)
+    next(button for button in owner.button if button.label == "Reject glossary.md").click().run(
+        timeout=60
+    )
+    rejected = _blob(owner)
+    assert "d1-state-rejected" in rejected
+    assert ">rejected<" in rejected
 
     png = b"\x89PNG\r\n\x1a\n" + b"pixels"
     owner.file_uploader[0].upload("logo.png", png, "image/png").run(timeout=60)

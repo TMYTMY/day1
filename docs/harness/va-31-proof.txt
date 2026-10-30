@@ -74,3 +74,13 @@ Level-2 recipes, PDF/xlsx text extraction.
 
 Rollback
 Leave the connections table and the approval columns in place. Older code does not read the connections table, so the environment database is the warehouse again. The approval column defaults to approved, so an older insert that does not set it stays retrievable.
+
+Taste chrome (re-QA)
+Approval is a pill: draft grey (d1-state-draft), approved green (d1-state-confirmed), rejected red (d1-state-rejected).
+Delete and Reject outline in danger and ask a second time (Delete/Reject the file name, or Keep). Disable is danger, after a separator, last. Enable is primary. Test is secondary.
+Sidebar label is 資料庫連線. Cards are one column of actions plus the alert well.
+Screenshots at 375 / 768 / 1280: agent store day1-va-32-taste/ (copy to /workspace/day1-va-32-taste/).
+  connections-empty-{375,768,1280}.png
+  connections-enabled-{375,768,1280}.png
+  knowledge-draft-analyst-{375,768,1280}.png
+  knowledge-draft-owner-{375,768,1280}.png

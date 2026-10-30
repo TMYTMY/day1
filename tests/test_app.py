@@ -87,11 +87,15 @@ def test_knowledge_base_page_indexes_and_deletes_a_glossary(monkeypatch, tmp_pat
     at.file_uploader[0].upload("glossary.md", glossary, "text/markdown").run(timeout=60)
     page = _blob(at)
     assert "glossary.md" in page
-    assert "chunks" in page
+    assert "Chunks" in page
+    assert "d1-state-draft" in page
     assert any(button.label == "Re-index" for button in at.button)
     assert any(button.label == "Delete" for button in at.button)
 
     at = next(button for button in at.button if button.label == "Delete").click().run(timeout=60)
+    assert "Delete glossary.md?" in _blob(at)
+    assert "No documents yet" not in _blob(at)
+    at = next(button for button in at.button if button.label == "Delete glossary.md").click().run(timeout=60)
     if "No documents yet" not in _blob(at):
         at = at.run(timeout=60)
     page = _blob(at)

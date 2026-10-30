@@ -374,6 +374,9 @@ class Worker:
         settings database itself.
         """
         settings = resolve_mail_settings(settings)
+        # build_adapter reads an enabled SQLite connection and leaves this
+        # settings object on the environment path, which is what seeding uses
+        # to tell the demo file from a file the operator chose.
         log = audit if audit is not None else AuditLog(settings.audit_path)
         routes = catalog if catalog is not None else load_catalog(settings.routing_path)
         titles = _topic_titles(routes)

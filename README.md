@@ -199,9 +199,13 @@ With no API key, a local planner writes the SQL and the screen says so. With a k
 
 ## Knowledge base
 
-Open **知識庫** in the sidebar after you sign in. Drop schema docs, DDL, a business glossary, or a synonym list onto the uploader. Accepted types are `.csv`, `.sql`, `.ddl`, `.md`, `.txt`, and `.json`, up to 2 MB each.
+Open **知識庫** in the sidebar after you sign in. Drop schema docs, DDL, a business glossary, or a synonym list onto the uploader. Text types are `.csv`, `.sql`, `.ddl`, `.md`, `.txt`, and `.json`. PDF, Excel (`.xlsx`), and PNG may be stored too. The cap is 2 MB. A new upload is **draft**. The owner approves or rejects it. Live answers retrieve **approved** text only. Files already in the index before approval existed stay **approved**. PDF and Excel are stored with a skip reason and are not indexed. PNG is badged **non-indexed**. There is one knowledge entry in the sidebar and one index under `data/knowledge/`.
 
-Each file is split into chunks and embedded into a local index at `data/knowledge/` (gitignored). The dashboard lists every file with its type, chunk count, and last updated time. **Re-index** rebuilds that file with the current embedder. **Delete** removes the file and its chunks. Uploaded SQL is stored as text and stays out of the warehouse connection.
+Each text file is split into chunks and embedded into that index (gitignored). The dashboard lists every file with its type, approval, chunk count, and last updated time. **Re-index** rebuilds that file with the current embedder. **Delete** removes the file and its chunks. Uploaded SQL is stored as text and stays out of the warehouse connection.
+
+## Connections
+
+Open **Connections** as the owner. Enter a local SQLite file, **Test connection**, then **Enable**. Until you enable one, questions use `DB_BACKEND` / `DB_PATH` from the environment. **Disable** returns to that environment. The test refuses a non-SQLite URL, a link-local address, and a metadata host, and it gives up after a few seconds. The page has no Postgres form and does not show a database password. The path is stored in the instance settings database (`SETTINGS_PATH`); it is not a secret, so it is not encrypted. Test, Enable, and Disable ask for the operator secret again.
 
 Routing stays the default path. A question still has to match the routing map and the role's tables before any SQL is written. Matching glossary snippets are retrieved after that, and only when a language-model key is set. They are appended to the model prompt as notes. The schema in that prompt remains the allowlist. The local planner answers from the routing map alone, so the demo still answers revenue and DAU questions with an empty knowledge base.
 
@@ -249,7 +253,7 @@ The flags are the point: every label ships `reviewed: false`, and the harness pr
 | `EMBEDDING_API_KEY` | Key for the embeddings call. Falls back to `OPENROUTER_API_KEY` when the provider is `openrouter`. |
 | `KNOWLEDGE_PATH` | On-disk index directory. Default `data/knowledge`. |
 | `ALERTS_PATH` | The instance's alert database: definitions and fires. Default `data/alerts.db`. Two instances must never share it. |
-| `SETTINGS_PATH` | Instance settings database. Default `data/instance.db`. Encrypted mail settings live here, and they are the whole transport or none of it: if anything about the transport is stored, every mail field resolves from the database and none from `SMTP_*`. |
+| `SETTINGS_PATH` | Instance settings database. Default `data/instance.db`. Encrypted mail settings live here, and they are the whole transport or none of it: if anything about the transport is stored, every mail field resolves from the database and none from `SMTP_*`. The SQLite connection row lives in the same file, unencrypted, because a file path is not a database password. |
 | `DAY1_SECRET_KEY` | Fernet key for that database. Create it with `python -m src.mail_setup --init-key` (mode 600, other lines untouched). Without it the Settings page refuses to save and does not store a password in the clear. A wrong key is an error, not a fallback to `SMTP_PASSWORD`: the store keeps a key-check value written with the first secret and refuses to read or write under a key that does not reproduce it. `--init-key` itself refuses when the database already holds ciphertext, because a new key could never read it. |
 | `MAX_ALERT_WINDOW_DAYS` | The longest window an alert definition may name, in days. Default 365. A longer window is refused with this number in the message; it is never clamped. |
 | `SMTP_HOST` | The mail host a fire is delivered through when the settings database has no host. Unset, and no database host, means the worker refuses to start: nothing is evaluated and dropped. |

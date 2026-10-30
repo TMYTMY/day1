@@ -119,7 +119,13 @@ def _passes(root: Path, llm) -> dict:
     noted_settings = replace(base, knowledge_path=root / "noted")
     empty_settings = replace(base, knowledge_path=root / "empty")
     noted_store = KnowledgeStore(noted_settings)
-    noted_store.add_document("glossary.md", NOTE.encode(), owner="finance", owner_role="finance")
+    noted_store.add_document(
+        "glossary.md",
+        NOTE.encode(),
+        owner="finance",
+        owner_role="finance",
+        approval="approved",
+    )
     empty_store = KnowledgeStore(empty_settings)
     user = authenticate("finance", "finance", base.users_path)
     catalog = load_catalog(base.routing_path)

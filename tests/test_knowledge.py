@@ -72,9 +72,15 @@ def test_prose_csv_and_json_chunk_without_executing():
 def test_upload_lists_searches_and_delete_leaves_the_warehouse_alone(env):
     before = env.adapter.row_count("revenue")
     store = KnowledgeStore(env.settings)
-    document = store.add_document("glossary.md", GLOSSARY, owner="analyst", owner_role="analyst")
+    document = store.add_document(
+        "glossary.md", GLOSSARY, owner="analyst", owner_role="analyst", approval="approved"
+    )
     sql_doc = store.add_document(
-        "wipe.sql", b"DELETE FROM revenue; DROP TABLE revenue;", owner="analyst", owner_role="analyst"
+        "wipe.sql",
+        b"DELETE FROM revenue; DROP TABLE revenue;",
+        owner="analyst",
+        owner_role="analyst",
+        approval="approved",
     )
     listed = {item.filename: item for item in store.list_documents(role="analyst")}
     assert listed["glossary.md"].chunk_count >= 1
@@ -114,7 +120,9 @@ def test_rejects_empty_and_unknown_types_and_strips_paths(env):
 
 def test_reindex_restores_search_after_the_embedding_id_changes(env):
     store = KnowledgeStore(env.settings)
-    document = store.add_document("glossary.md", GLOSSARY, owner="analyst", owner_role="analyst")
+    document = store.add_document(
+        "glossary.md", GLOSSARY, owner="analyst", owner_role="analyst", approval="approved"
+    )
     with store._connect() as conn:
         conn.execute(
             "UPDATE documents SET embedding_id = ? WHERE id = ?",
@@ -231,12 +239,15 @@ def test_rules_still_answer_without_using_notes_when_no_model_is_configured(env)
 
 def test_model_prompt_gets_notes_only_after_routing_picks_a_table(env):
     store = KnowledgeStore(env.settings)
-    store.add_document("glossary.md", GLOSSARY, owner="analyst", owner_role="analyst")
+    store.add_document(
+        "glossary.md", GLOSSARY, owner="analyst", owner_role="analyst", approval="approved"
+    )
     store.add_document(
         "weather.md",
         b"Weather in Hong Kong is not a warehouse metric.",
         owner="analyst",
         owner_role="analyst",
+        approval="approved",
     )
     calls = {"notes": 0}
     original = store.prompt_notes
@@ -317,7 +328,9 @@ def test_prompt_builder_keeps_notes_out_of_the_schema_allowlist():
 
 def test_search_is_scoped_to_the_uploading_role(env):
     store = KnowledgeStore(env.settings)
-    store.add_document("finance-only.md", GLOSSARY, owner="finance", owner_role="finance")
+    store.add_document(
+        "finance-only.md", GLOSSARY, owner="finance", owner_role="finance", approval="approved"
+    )
     assert store.search("revenue by product", role="growth") == []
     assert store.prompt_notes("revenue by product", role="growth") == []
     assert store.search("revenue by product", role="finance")[0].filename == "finance-only.md"
@@ -374,7 +387,9 @@ def test_index_written_before_scoping_is_migrated_and_hidden(env):
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(documents)")}
     assert {"owner", "owner_role"} <= columns
 
-    adopted = store.add_document("legacy.md", GLOSSARY, owner="analyst", owner_role="analyst")
+    adopted = store.add_document(
+        "legacy.md", GLOSSARY, owner="analyst", owner_role="analyst", approval="approved"
+    )
     assert adopted.owner == "analyst"
     # a row with no owner_role stays visible for adoption but out of answers
     with store._connect() as conn:

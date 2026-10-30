@@ -273,6 +273,7 @@ def build_store(directory: Path, index_path: Path) -> KnowledgeStore:
             body,
             owner="eval",
             owner_role=item["owner_role"],
+            approval="approved",
         )
     return store
 

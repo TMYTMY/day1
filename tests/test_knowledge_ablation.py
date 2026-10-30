@@ -80,7 +80,13 @@ def _cached_snippets(audit: AuditLog) -> list[str]:
 
 def test_the_note_is_the_only_delta_in_the_request(env, tmp_path):
     noted_store = KnowledgeStore(env.settings)
-    noted_store.add_document("glossary.md", NOTE.encode(), owner="finance", owner_role="finance")
+    noted_store.add_document(
+        "glossary.md",
+        NOTE.encode(),
+        owner="finance",
+        owner_role="finance",
+        approval="approved",
+    )
     empty_store = KnowledgeStore(replace(env.settings, knowledge_path=tmp_path / "empty"))
     llm = _Scripted(SCRIPTED_SQL)
     noted_audit = AuditLog(tmp_path / "noted-audit.db")
@@ -136,6 +142,7 @@ def test_a_note_owned_by_another_role_stays_out_of_the_prompt(env):
         GROWTH_NOTE.encode(),
         owner="growth",
         owner_role="growth",
+        approval="approved",
     )
     llm = _Scripted(SCRIPTED_SQL)
     answer = _ask(env, env.finance, QUESTION, llm=llm, knowledge=store)

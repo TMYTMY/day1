@@ -18,6 +18,8 @@ import streamlit as st
 from src.audit import AuditLog
 from src.auth import authenticate
 from src.config import ConfigError, Settings, load_settings
+from src.connections import apply_enabled_connection
+from src.connections_page import render_connections_page
 from src.db.factory import build_adapter
 from src.db.resolve import read_as_of
 from src.db.sqlite import DEFAULT_STATEMENT_TIMEOUT_MS
@@ -90,7 +92,10 @@ def _css() -> None:
             margin: 32px 0 20px;
           }
           .st-key-mail_clear button,
-          .st-key-mail_clear_confirm button {
+          .st-key-mail_clear_confirm button,
+          .st-key-connection_disable button,
+          [class*="st-key-kb-delete-"] button,
+          [class*="st-key-kb-reject-"] button {
             background: transparent !important;
             color: var(--d1-danger) !important;
             border: 1px solid var(--d1-danger) !important;
@@ -113,6 +118,7 @@ def _css() -> None:
           }
           .d1-state-confirmed { color: #0E6B56; }
           .d1-state-paused { color: #8A5A12; }
+          .d1-state-rejected { color: var(--d1-danger); }
           .d1-state-superseded, .d1-state-draft { color: #5C6562; }
           .d1-alert-well {
             display: grid;
@@ -493,6 +499,7 @@ def _sign_out() -> None:
     st.session_state.pop("nav_page", None)
     st.session_state.pop("kb_seen_ids", None)
     st.session_state.pop("kb_notice", None)
+    st.session_state.pop("kb_confirm", None)
     st.session_state.pop("staged_seen_ids", None)
     st.rerun()
 
@@ -501,6 +508,7 @@ def _page_choice() -> str:
     labels = {
         "ask": "Ask",
         "knowledge": "知識庫",
+        "connections": "資料庫連線",
         "sources": "Data sources",
         "mail": "Mail settings",
         "alerts": "Alerts",
@@ -508,7 +516,7 @@ def _page_choice() -> str:
     with st.sidebar:
         return st.radio(
             "Navigate",
-            options=["ask", "knowledge", "sources", "mail", "alerts"],
+            options=["ask", "knowledge", "connections", "sources", "mail", "alerts"],
             format_func=lambda value: labels[value],
             key="nav_page",
         )
@@ -704,11 +712,14 @@ def main() -> None:
     _init_state()
     try:
         settings = load_settings()
+        # ``settings`` stays the environment. The adapter applies an enabled
+        # UI connection on top of it and does not seed that file.
+        effective = apply_enabled_connection(settings)
         adapter = build_adapter(settings)
         sources = load_sources(
             settings.sources_dir,
             routing_path=settings.routing_path,
-            warehouse_path=settings.db_path,
+            warehouse_path=effective.db_path,
         )
         catalog = merge_catalog(load_catalog(settings.routing_path), sources)
         audit = AuditLog(settings.audit_path)
@@ -733,12 +744,15 @@ def main() -> None:
         _sign_out()
         return
     st.session_state.last_seen = _now()
-    if settings.db_backend != "sqlite":
+    if effective.db_backend != "sqlite":
         st.warning(
-            f"DB_BACKEND={settings.db_backend} is a stub in this build. "
+            f"DB_BACKEND={effective.db_backend} is a stub in this build. "
             "Set DB_BACKEND=sqlite to use the demo database."
         )
     page = _page_choice()
+    if page == "connections":
+        render_connections_page(user, settings, audit)
+        return
     if page == "knowledge":
         with st.sidebar:
             st.markdown('<p class="d1-kicker">Signed in</p>', unsafe_allow_html=True)
@@ -747,7 +761,7 @@ def main() -> None:
             if st.button("Sign out", key="sign_out", width="stretch"):
                 _sign_out()
             _source_link()
-        render_knowledge_page(knowledge, settings, user)
+        render_knowledge_page(knowledge, settings, user, audit)
         return
     if page == "sources":
         _render_sources_page(user, settings, sources)

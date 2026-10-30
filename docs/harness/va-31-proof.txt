@@ -1,0 +1,86 @@
+Day1 vA proof notes — issue #31
+Coding contract: vA only. Do not merge. Do not deploy.
+
+Gate map
+G0  Draft PR against main, linked to #31. Not merged. Diff is Connections + knowledge approval only.
+G1  Sidebar Connections. SQLite file path only (no Postgres host/user/password fields).
+    Test on a local SQLite file succeeds. Enable uses that file for asks.
+    Disable returns to DB_BACKEND / DB_PATH. The page does not print DATABASE_URL or DB_PASSWORD.
+G2  tests/test_connections.py
+    Non-SQLite schemes -> error class scheme.
+    169.254.1.1 and fe80:: -> link_local.
+    169.254.169.254, metadata.google.internal, fd00:ec2::254 -> metadata.
+    A probe that sleeps is cut off (timeout) in under 1.5s. Hard cap in code is 3s.
+G3  One sidebar label, 知識庫. Store is src/knowledge, files under data/knowledge/.
+    Upload md/csv -> approval draft. Legacy index rows with no approval column open as approved.
+    Analyst has no Approve button. Owner can Approve and Reject.
+    tests/test_va_pages.py::test_owner_approves_and_rejects_on_the_knowledge_page
+    tests/test_knowledge_approval.py::test_legacy_rows_without_an_approval_column_are_approved
+G4  tests/test_knowledge_approval.py::test_new_uploads_are_draft_and_live_retrieval_is_approved_only
+    Draft search and prompt notes are empty. A scripted ask does not contain the draft filename.
+    After approve, search hits. After reject, search is empty again.
+G5  PDF and xlsx store under data/knowledge/files/<id> with skip reason "not extracted".
+    Search stays empty after approve, and stays empty even if a chunk is forced onto the row.
+    PNG skip reason and badge text are non-indexed.
+G6  ../../ and ..\ names are reduced to the basename. NUL in the name is rejected.
+    The stored blob path stays inside data/knowledge/files/. Cap remains 2_000_000 bytes.
+    A rejected postgres URL's password is absent from the verdict, the settings database, the audit database, and CSV/HTML export.
+G7  python3 -m pytest -q  -> exit 0. Count is in the PR body for the tip SHA.
+G8  This file. A copy with the tip SHA is under the agent store day1-va-31-proof/.
+
+Before -> after
+Before: DB path came only from the environment. Every uploaded text file was retrieved. PDF/xlsx/png were refused.
+After: an enabled Connections row replaces the environment SQLite path until Disable. New uploads are draft and are not retrieved. Existing rows are approved. PDF/xlsx/png are stored and skipped.
+
+How to enable a SQLite connection
+1. python -m src.operator_secret --init
+   (once; the owner signs in with that secret)
+2. streamlit run app.py
+3. Sign in as owner. Open Connections.
+4. SQLite file path: a local file, for example data/demo.db
+5. Type the operator secret again. Test connection. Then Enable.
+6. Sign in as a role that can query. Ask a revenue question. The rows come from that file.
+7. Connections -> operator secret -> Disable. The next ask uses DB_PATH again.
+
+How to upload md/csv and approve or reject
+1. Sign in as analyst (password analyst on the demo file). Open 知識庫.
+2. Upload a .md or .csv (2 MB or smaller). The card says Approval · draft.
+   There is no Approve button.
+3. Sign out. Sign in as owner. Open 知識庫. The same file is listed.
+4. Approve. The card says Approval · approved.
+5. Reject. The card says Approval · rejected.
+
+How to prove a draft is excluded from retrieval
+The live path is store.search / store.prompt_notes, which answer_question uses when a model key is set.
+The local planner does not read notes, so the UI demo without a key cannot show the exclusion.
+Run:
+
+  python3 -m pytest -q tests/test_knowledge_approval.py::test_new_uploads_are_draft_and_live_retrieval_is_approved_only
+
+That test uploads a glossary, asserts search is empty, asserts the model prompt does not contain the filename, approves, asserts a hit, rejects, asserts search is empty.
+
+Security invariants
+- Test does not open a refused target. Messages and audit rows do not contain the submitted URL.
+- No database password is written to the connections table, the page, the audit log, or export.
+- The SQLite path is not a secret, so it is not Fernet-encrypted. Mail passwords still are.
+- Test, Enable, and Disable ask for the operator secret again and then drop it from the session.
+- PDF/xlsx bytes are not chunked and the search query also excludes those extensions.
+- Approved memory does not change table grants, routing.yaml, or the SELECT allowlist.
+
+Out of scope (not in this branch)
+Report/PDF generation, Electron/tray, Postgres connection form, CAG pack editor,
+queryable CSV sandbox, routing.yaml synonym rewrites, alert definition create-in-UI,
+Level-2 recipes, PDF/xlsx text extraction.
+
+Rollback
+Leave the connections table and the approval columns in place. Older code does not read the connections table, so the environment database is the warehouse again. The approval column defaults to approved, so an older insert that does not set it stays retrievable.
+
+Taste chrome (re-QA)
+Approval is a pill: draft grey (d1-state-draft), approved green (d1-state-confirmed), rejected red (d1-state-rejected).
+Delete and Reject outline in danger and ask a second time (Delete/Reject the file name, or Keep). Disable is danger, after a separator, last. Enable is primary. Test is secondary.
+Sidebar label is 資料庫連線. Cards are one column of actions plus the alert well.
+Screenshots at 375 / 768 / 1280: agent store day1-va-32-taste/ (copy to /workspace/day1-va-32-taste/).
+  connections-empty-{375,768,1280}.png
+  connections-enabled-{375,768,1280}.png
+  knowledge-draft-analyst-{375,768,1280}.png
+  knowledge-draft-owner-{375,768,1280}.png

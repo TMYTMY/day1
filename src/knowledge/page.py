@@ -1,23 +1,43 @@
-"""知識庫 dashboard. Uploads are indexed locally and never executed."""
+"""知識庫 dashboard. Uploads are indexed locally and never executed.
+
+PDF, XLSX, and PNG are stored on this page and do not enter retrieval.
+New files start as draft. Only an approved text file is retrieved for an ask.
+The admin role is the one that approves or rejects.
+"""
 
 from __future__ import annotations
 
+import sqlite3
+
 import streamlit as st
 
+from src.audit import AuditLog
+from src.capabilities import ADMIN, authorize
 from src.config import Settings
-from src.knowledge.store import KnowledgeDocument, KnowledgeError, KnowledgeStore
+from src.knowledge.store import (
+    STORED_EXTENSIONS,
+    KnowledgeDocument,
+    KnowledgeError,
+    KnowledgeStore,
+)
 from src.models import User
 
 
-def render_knowledge_page(store: KnowledgeStore, settings: Settings, user: User) -> None:
+def render_knowledge_page(
+    store: KnowledgeStore,
+    settings: Settings,
+    user: User,
+    audit: AuditLog | None = None,
+) -> None:
     notice = st.session_state.pop("kb_notice", None)
     st.markdown('<p class="d1-kicker">Knowledge Base</p>', unsafe_allow_html=True)
     st.title("知識庫")
     st.caption(
         "Drop schema docs, DDL, a business glossary, or a synonym list. "
         "The routing map still chooses the table. Matching notes are added to the "
-        "language-model prompt when it writes SQL. Files are scoped to your role, "
-        "and only the uploader can delete or re-index a file."
+        "language-model prompt when it writes SQL, and only after this file is approved. "
+        "Files are scoped to your role, and only the uploader can delete or re-index a file. "
+        "PDF and Excel are stored but not indexed. PNG is stored as non-indexed."
     )
     if notice:
         st.success(notice)
@@ -27,14 +47,15 @@ def render_knowledge_page(store: KnowledgeStore, settings: Settings, user: User)
             "Until then, this index uses local hash vectors."
         )
     uploads = st.file_uploader(
-        "Drop files to index",
-        type=["csv", "sql", "ddl", "md", "txt", "json"],
+        "Drop files to store",
+        type=["csv", "sql", "ddl", "md", "txt", "json", "pdf", "xlsx", "png"],
         accept_multiple_files=True,
         key="kb_upload",
-        help="CSV, SQL, DDL, Markdown, text, or JSON. Files stay on this machine.",
+        help="Text files can be approved into retrieval. PDF, Excel, and PNG are stored only. 2 MB max.",
     )
     _consume_uploads(store, uploads or [], user)
-    documents = store.list_documents(role=user.role)
+    reviewer = authorize(user, ADMIN).allowed
+    documents = store.list_documents(role=user.role, include_all=reviewer)
     current_embedding = store.embedder.embedding_id
     _metrics(store, documents)
     legacy = [document for document in documents if document.legacy]
@@ -55,13 +76,21 @@ def render_knowledge_page(store: KnowledgeStore, settings: Settings, user: User)
                 st.caption(
                     f"{document.extension.upper()} · {document.chunk_count} chunks · Updated {when}"
                 )
+                st.caption(f"Approval · {document.approval}")
+                if document.extension == "png" or document.skip_reason == "non-indexed":
+                    st.markdown(
+                        '<span class="d1-state">non-indexed</span>',
+                        unsafe_allow_html=True,
+                    )
+                elif document.extension in STORED_EXTENSIONS and document.skip_reason:
+                    st.caption(document.skip_reason)
                 if document.legacy:
                     st.caption("Unowned · re-index to attach it to your role.")
                 else:
                     st.caption(f"Uploaded by {document.owner or 'unknown'} ({document.owner_role})")
                 if document.truncated:
                     st.caption("Indexed the first 200 chunks.")
-                if document.embedding_id != current_embedding:
+                if document.indexed and document.embedding_id != current_embedding:
                     st.caption("Re-index this file so it matches the current embedding provider.")
                 left, right = st.columns(2)
                 if left.button("Re-index", key=f"reindex-{document.id}", width="stretch"):
@@ -71,6 +100,14 @@ def render_knowledge_page(store: KnowledgeStore, settings: Settings, user: User)
                         _delete(store, document.id, user)
                 else:
                     right.caption("Only the uploader can delete.")
+                if reviewer:
+                    approve, reject = st.columns(2)
+                    if approve.button("Approve", key=f"approve-{document.id}", width="stretch"):
+                        _set_approval(store, document.id, "approved", user, audit)
+                    if reject.button("Reject", key=f"reject-{document.id}", width="stretch"):
+                        _set_approval(store, document.id, "rejected", user, audit)
+                else:
+                    st.caption("Only the owner can approve or reject.")
 
 
 def _metrics(store: KnowledgeStore, documents: list[KnowledgeDocument]) -> None:
@@ -99,7 +136,12 @@ def _consume_uploads(store: KnowledgeStore, uploads: list, user: User) -> None:
             st.error(f"{uploaded.name}: {exc}")
             continue
         seen.append(file_id)
-        notices.append(f"Indexed {document.filename} · {document.chunk_count} chunks.")
+        if document.indexed:
+            notices.append(
+                f"Stored {document.filename} as draft · {document.chunk_count} chunks."
+            )
+        else:
+            notices.append(f"Stored {document.filename} as draft. {document.skip_reason}")
     if notices:
         st.session_state.kb_seen_ids = seen
         for notice in notices:
@@ -113,6 +155,37 @@ def _reindex(store: KnowledgeStore, document_id: str, user: User) -> None:
         st.error(str(exc))
         return
     st.session_state.kb_notice = f"Re-indexed {document.filename} · {document.chunk_count} chunks."
+    st.rerun()
+
+
+def _set_approval(
+    store: KnowledgeStore,
+    document_id: str,
+    approval: str,
+    user: User,
+    audit: AuditLog | None,
+) -> None:
+    if not authorize(user, ADMIN).allowed:
+        st.error(f"The {ADMIN} capability is not granted to the {user.role} role.")
+        return
+    try:
+        document = store.set_approval(document_id, approval)
+    except KnowledgeError as exc:
+        st.error(str(exc))
+        return
+    if audit is not None:
+        try:
+            audit.record_event(
+                username=user.username,
+                role=user.role,
+                status="ok",
+                event_type="knowledge_approval",
+                capability=ADMIN,
+                question=f"{approval} {document.filename}",
+            )
+        except sqlite3.Error:
+            st.caption("The approval was saved, and the usage log was not.")
+    st.session_state.kb_notice = f"{document.filename} is {approval}."
     st.rerun()
 
 

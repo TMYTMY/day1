@@ -229,6 +229,20 @@ PLACEHOLDER_MARKER = "PLACEHOLDER"
 PLACEHOLDER_OWNER = "placeholder"
 
 
+def carries_placeholder_marker(definition: str, owner: str) -> bool:
+    """True when this text is still the unconfirmed marker, not a definition.
+
+    Shared by :func:`is_placeholder` (which asks it of a catalogue entry) and by
+    the metric page (which asks it of the text someone is about to sign), so the
+    two can never disagree about what a placeholder looks like. Signing the
+    marker verbatim would put a metric in force whose definition says PLACEHOLDER
+    — the exact defect the sign-off exists to prevent.
+    """
+    text = (definition or "").upper()
+    name = (owner or "").strip().casefold()
+    return PLACEHOLDER_MARKER in text or name == PLACEHOLDER_OWNER
+
+
 def is_placeholder(metric: Metric) -> bool:
     """True when this metric definition has not been confirmed by a business owner.
 
@@ -245,7 +259,8 @@ def is_placeholder(metric: Metric) -> bool:
     """
     text = (metric.definition or "").upper()
     owner = (metric.owner or "").strip().casefold()
-    return PLACEHOLDER_MARKER in text or owner == PLACEHOLDER_OWNER
+    return carries_placeholder_marker(text, owner)
+
 
 
 def measure_column(metric: Metric) -> str | None:

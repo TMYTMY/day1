@@ -9,6 +9,7 @@ failure that matters most.
 
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import replace
 from datetime import date
 
@@ -26,7 +27,12 @@ from src.metric_signatures import (
     status,
 )
 from src.metrics import load_metrics, match_metrics
-from src.metrics_page import file_diverges, secret_refusal, status_badge
+from src.metrics_page import (
+    file_diverges,
+    secret_refusal,
+    status_badge,
+    submit_signature,
+)
 from src.models import User
 from src.operator_secret import store_secret
 
@@ -163,6 +169,8 @@ def test_the_catalogue_page_signs_a_definition_and_the_question_then_answers(
     assert "Sign this definition" in [button.label for button in at.button]
 
     at.text_area(key="sign_dau_by_platform_definition").set_value(REAL_DEFINITION)
+    # A placeholder owner is not an owner: the signature records who confirmed it.
+    at.text_input(key="sign_dau_by_platform_owner").set_value("growth-lead")
     at.text_input(key="metric_secret_sign_dau_by_platform").set_value(OPERATOR)
     at.button(key="sign_submit_sign_dau_by_platform").click().run(timeout=60)
 
@@ -230,3 +238,46 @@ def test_the_page_reports_a_file_edit_as_not_in_force(monkeypatch, tmp_path):
     assert active_signatures(settings.audit_path)["dau_by_platform"].definition == (
         REAL_DEFINITION
     )
+
+
+def test_signing_the_shipped_placeholder_marker_is_refused(monkeypatch, tmp_path):
+    """One button press on a shipped draft must not put PLACEHOLDER in force.
+
+    The page pre-fills the draft text, so on the three shipped placeholders the
+    first press sends exactly the marker back. Signing it would make a number
+    answerable whose definition literally says PLACEHOLDER — the defect the
+    sign-off exists to prevent — and the hash would match, so nothing later
+    could tell it apart from a real confirmation.
+    """
+    _isolate(monkeypatch, tmp_path)
+    settings = load_settings()
+    metric = next(
+        entry for entry in load_metrics(settings.metrics_path) if entry.id == "dau_by_platform"
+    )
+    audit = AuditLog(settings.audit_path)
+
+    outcome = submit_signature(
+        metric=metric,
+        definition=metric.definition,
+        exceptions=metric.exceptions,
+        owner=metric.owner,
+        effective_from=metric.effective_from.isoformat(),
+        secret=OPERATOR,
+        user=User("owner", "owner", (), ("admin",)),
+        settings=settings,
+        audit=audit,
+    )
+
+    assert outcome.ok is False
+    assert "placeholder" in outcome.message.lower()
+    assert active_signatures(settings.audit_path) == {}
+
+    with sqlite3.connect(settings.audit_path) as conn:
+        rows = conn.execute(
+            "SELECT event_type, capability, metric_id, error FROM audit_events ORDER BY id"
+        ).fetchall()
+    assert len(rows) == 1
+    assert rows[0][0] == "settings_refused"
+    assert rows[0][1] == "admin"
+    assert rows[0][2] == "dau_by_platform"
+    assert rows[0][3] == "definition_placeholder"

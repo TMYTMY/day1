@@ -56,7 +56,12 @@ from src.metric_signatures import (
     active_signatures,
     sign,
 )
-from src.metrics import Metric, definition_hash, load_metrics
+from src.metrics import (
+    Metric,
+    carries_placeholder_marker,
+    definition_hash,
+    load_metrics,
+)
 from src.models import User
 
 # Why a sign attempt was refused. The audit row records these in its error
@@ -66,6 +71,7 @@ REASON_SECRET_UNSET = "operator_secret_unset"
 REASON_SECRET_EMPTY = "operator_secret_empty"
 REASON_SECRET_MISMATCH = "operator_secret_mismatch"
 REASON_DEFINITION_EMPTY = "definition_empty"
+REASON_DEFINITION_PLACEHOLDER = "definition_placeholder"
 REASON_OWNER_EMPTY = "owner_empty"
 REASON_DATE_INVALID = "effective_from_invalid"
 
@@ -146,6 +152,13 @@ def field_refusal(
         return (REASON_DEFINITION_EMPTY, "A definition cannot be empty. Nothing was signed.")
     if not (owner or "").strip():
         return (REASON_OWNER_EMPTY, "A definition needs an owner. Nothing was signed.")
+    if carries_placeholder_marker(definition, owner):
+        return (
+            REASON_DEFINITION_PLACEHOLDER,
+            "This is still a placeholder, not a definition: the text says "
+            "PLACEHOLDER or the owner is placeholder. Write the real definition "
+            "and name the owner who confirmed it. Nothing was signed.",
+        )
     try:
         date.fromisoformat((effective_from or "").strip())
     except ValueError:

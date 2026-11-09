@@ -87,7 +87,8 @@ def _distinct(value):
     return ("cache-key-other", value)
 
 
-def test_editing_only_the_owner_misses_the_answer_cache(env, tmp_path):
+def test_editing_only_the_owner_changes_the_answer_only_once_signed(env, tmp_path, seed_signature):
+    """The file is the draft: its owner is not in force until the edit is signed."""
     path, source = _copy_metrics(tmp_path)
     settings = replace(env.settings, metrics_path=path)
     llm = _llm()
@@ -103,8 +104,18 @@ def test_editing_only_the_owner_misses_the_answer_cache(env, tmp_path):
     assert edited.owner == "revenue-controller"
     assert definition_hash(edited) == before
 
+    # The file edit is not in force: the signed owner still answers, and that
+    # answer is the cached one, so no second model call is made.
+    cached = _ask(env, settings, llm)
+    assert cached.status == "ok"
+    assert cached.sql == first.sql
+    assert len(llm.seen) == 1
+
+    # Signing the file's version puts the new owner in force. Owner is part of
+    # the cache key, so SQL generated for the old owner must not be reused.
+    seed_signature(settings, edited)
     second = _ask(env, settings, llm)
-    assert len(llm.seen) == 2, "editing owner must not reuse SQL generated for the previous owner"
+    assert len(llm.seen) == 2, "signing a new owner must not reuse SQL generated for the previous owner"
     assert second.status == "ok"
     assert second.sql is not None and "gen2" in second.sql
     assert "gen1" not in second.sql
@@ -112,14 +123,15 @@ def test_editing_only_the_owner_misses_the_answer_cache(env, tmp_path):
     assert "Owner: finance-reporting" in _prompt(llm.seen[0])
 
     rows = _audit_rows(env.audit.path)
-    assert len(rows) == 2
-    assert rows[0]["metric_id"] == rows[1]["metric_id"] == "revenue_by_product"
-    assert rows[0]["definition_hash"] == rows[1]["definition_hash"] == before
-    assert rows[0]["sql"] is not None and "gen1" in rows[0]["sql"]
-    assert rows[1]["sql"] is not None and "gen2" in rows[1]["sql"]
+    assert len(rows) == 3
+    assert rows[0]["metric_id"] == rows[1]["metric_id"] == rows[2]["metric_id"] == "revenue_by_product"
+    assert rows[0]["definition_hash"] == rows[1]["definition_hash"] == rows[2]["definition_hash"] == before
+    assert "gen1" in rows[0]["sql"]
+    assert "gen1" in rows[1]["sql"]
+    assert "gen2" in rows[2]["sql"]
 
 
-def test_editing_only_effective_from_misses_the_answer_cache(env, tmp_path):
+def test_editing_only_effective_from_changes_the_answer_only_once_signed(env, tmp_path, seed_signature):
     path, source = _copy_metrics(tmp_path)
     settings = replace(env.settings, metrics_path=path)
     llm = _llm()
@@ -135,8 +147,14 @@ def test_editing_only_effective_from_misses_the_answer_cache(env, tmp_path):
     assert edited.effective_from == date(2026, 1, 1)
     assert definition_hash(edited) == before
 
+    cached = _ask(env, settings, llm)
+    assert cached.status == "ok"
+    assert cached.sql == first.sql
+    assert len(llm.seen) == 1
+
+    seed_signature(settings, edited)
     second = _ask(env, settings, llm)
-    assert len(llm.seen) == 2, "editing effective_from must not reuse SQL from the previous date"
+    assert len(llm.seen) == 2, "signing a new effective date must not reuse SQL for the previous date"
     assert second.status == "ok"
     assert second.sql is not None and "gen2" in second.sql
     assert "gen1" not in second.sql
@@ -144,10 +162,11 @@ def test_editing_only_effective_from_misses_the_answer_cache(env, tmp_path):
     assert "Effective from: 2026-06-15" in _prompt(llm.seen[0])
 
     rows = _audit_rows(env.audit.path)
-    assert len(rows) == 2
-    assert rows[0]["definition_hash"] == rows[1]["definition_hash"] == before
-    assert rows[0]["sql"] is not None and "gen1" in rows[0]["sql"]
-    assert rows[1]["sql"] is not None and "gen2" in rows[1]["sql"]
+    assert len(rows) == 3
+    assert rows[0]["definition_hash"] == rows[1]["definition_hash"] == rows[2]["definition_hash"] == before
+    assert "gen1" in rows[0]["sql"]
+    assert "gen1" in rows[1]["sql"]
+    assert "gen2" in rows[2]["sql"]
 
 
 def test_changing_the_model_id_misses_the_answer_cache(env):
@@ -174,7 +193,8 @@ def test_changing_the_model_id_misses_the_answer_cache(env):
     assert rows[1]["sql"] is not None and "gen2" in rows[1]["sql"]
 
 
-def test_editing_only_the_definition_misses_the_answer_cache(env, tmp_path):
+def test_editing_only_the_definition_changes_the_answer_only_once_signed(env, tmp_path, seed_signature):
+    """A file edit is a draft. Signing it is a new definition, and a new hash."""
     path, source = _copy_metrics(tmp_path)
     settings = replace(env.settings, metrics_path=path)
     llm = _llm()
@@ -196,6 +216,13 @@ def test_editing_only_the_definition_misses_the_answer_cache(env, tmp_path):
     assert edited.definition == confirmed
     assert after != before
 
+    # Not in force yet: the signed text answers, from its cache.
+    cached = _ask(env, settings, llm)
+    assert cached.status == "ok"
+    assert cached.sql == first.sql
+    assert len(llm.seen) == 1
+
+    seed_signature(settings, edited)
     second = _ask(env, settings, llm)
     assert len(llm.seen) == 2
     assert second.status == "ok"
@@ -203,12 +230,13 @@ def test_editing_only_the_definition_misses_the_answer_cache(env, tmp_path):
     assert "gen1" not in second.sql
 
     rows = _audit_rows(env.audit.path)
-    assert len(rows) == 2
-    assert rows[0]["definition_hash"] == before
-    assert rows[1]["definition_hash"] == after
-    assert rows[0]["sql"] is not None and "gen1" in rows[0]["sql"]
-    assert rows[1]["sql"] is not None and "gen2" in rows[1]["sql"]
-    assert rows[1]["metric_id"] == "revenue_by_product"
+    assert len(rows) == 3
+    assert rows[0]["definition_hash"] == rows[1]["definition_hash"] == before
+    assert rows[2]["definition_hash"] == after
+    assert "gen1" in rows[0]["sql"]
+    assert "gen1" in rows[1]["sql"]
+    assert "gen2" in rows[2]["sql"]
+    assert rows[2]["metric_id"] == "revenue_by_product"
 
 
 def test_a_legacy_question_role_cache_is_dropped_and_not_served(env, tmp_path):

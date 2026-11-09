@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import sqlite3
 
-from src.config import ROOT
+from src.config import ROOT, load_settings
+from src.metrics import load_metrics
 from src.operator_secret import store_secret
 from streamlit.testing.v1 import AppTest
 
@@ -75,8 +76,19 @@ def _canary(path) -> None:
     conn.close()
 
 
-def test_connections_page_is_sqlite_only_and_does_not_echo_secrets(monkeypatch, tmp_path):
+def test_connections_page_is_sqlite_only_and_does_not_echo_secrets(monkeypatch, tmp_path, seed_signature):
     _isolate(monkeypatch, tmp_path)
+    # The last step asks a question, and a number is only answered against a
+    # signed definition: an operator visit happened before this one.
+    settings = load_settings()
+    seed_signature(
+        settings,
+        next(
+            metric
+            for metric in load_metrics(settings.metrics_path)
+            if metric.id == "revenue_by_product"
+        ),
+    )
     canary = tmp_path / "canary.db"
     _canary(canary)
 

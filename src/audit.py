@@ -164,32 +164,45 @@ class AuditLog:
         finally:
             conn.close()
 
-    def write(self, event: AuditEvent) -> None:
-        with self._session() as conn:
-            conn.execute(
-                """
-                INSERT INTO audit_events (
-                    ts, username, role, question, routed_tables, sql, status, row_count, error,
-                    metric_id, definition_hash, source_id, event_type, capability
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    _stamp(),
-                    event.username,
-                    event.role,
-                    event.question[:2000],
-                    ",".join(event.routed_tables),
-                    (event.sql or "")[:8000] or None,
-                    event.status,
-                    event.row_count,
-                    (event.error or "")[:500] or None,
-                    (event.metric_id or "")[:200] or None,
-                    (event.definition_hash or "")[:64] or None,
-                    (event.source_id or "")[:200] or None,
-                    (event.event_type or "question")[:64],
-                    (event.capability or "")[:64] or None,
-                ),
-            )
+    def _insert(self, conn: sqlite3.Connection, event: AuditEvent) -> None:
+        conn.execute(
+            """
+            INSERT INTO audit_events (
+                ts, username, role, question, routed_tables, sql, status, row_count, error,
+                metric_id, definition_hash, source_id, event_type, capability
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                _stamp(),
+                event.username,
+                event.role,
+                event.question[:2000],
+                ",".join(event.routed_tables),
+                (event.sql or "")[:8000] or None,
+                event.status,
+                event.row_count,
+                (event.error or "")[:500] or None,
+                (event.metric_id or "")[:200] or None,
+                (event.definition_hash or "")[:64] or None,
+                (event.source_id or "")[:200] or None,
+                (event.event_type or "question")[:64],
+                (event.capability or "")[:64] or None,
+            ),
+        )
+
+    def write(self, event: AuditEvent, *, conn: sqlite3.Connection | None = None) -> None:
+        """Write one row, on a caller's transaction when one is given.
+
+        A signature and the audit row that records it must be one transaction
+        (see :mod:`src.metric_signatures`), so the insert accepts a connection
+        the caller already opened. Without one, this method opens and commits
+        its own, which is what every other writer does.
+        """
+        if conn is not None:
+            self._insert(conn, event)
+            return
+        with self._session() as session:
+            self._insert(session, event)
 
     def record_event(
         self,
@@ -207,6 +220,7 @@ class AuditLog:
         metric_id: str | None = None,
         definition_hash: str | None = None,
         source_id: str | None = None,
+        conn: sqlite3.Connection | None = None,
     ) -> None:
         """Write one audit row. The one writer every capability shares.
 
@@ -216,6 +230,9 @@ class AuditLog:
         refused. A future capability writes its own action name and needs no
         new SQL. The roll-up columns keep their old meaning, so an existing
         reader (the sidebar, a script) keeps working.
+
+        ``conn`` is for a caller that must write this row in its own
+        transaction — a signature and its audit row are one write or neither.
         """
         self.write(
             AuditEvent(
@@ -232,7 +249,8 @@ class AuditLog:
                 source_id=source_id,
                 event_type=event_type,
                 capability=capability,
-            )
+            ),
+            conn=conn,
         )
 
     def recent(self, username: str, limit: int = 8) -> list[dict]:

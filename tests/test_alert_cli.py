@@ -20,7 +20,8 @@ import pytest
 import yaml
 
 from src.alert_cli import PASSWORD_ENV, main
-from src.config import ROOT
+from src.config import ROOT, load_settings
+from src.metrics import load_metrics
 
 ROUTING = ROOT / "config" / "routing.yaml"
 
@@ -105,7 +106,7 @@ def _write(tmp_path, name, text):
 
 
 @pytest.fixture
-def instance(tmp_path, monkeypatch):
+def instance(tmp_path, monkeypatch, seed_signature):
     """One instance whose paths, catalogue and window maximum come from the env."""
     metrics_path = _write(
         tmp_path, "metrics.yaml", yaml.safe_dump(_METRICS, allow_unicode=True, sort_keys=False)
@@ -118,6 +119,11 @@ def instance(tmp_path, monkeypatch):
     monkeypatch.setenv("ROUTING_PATH", str(ROUTING))
     monkeypatch.setenv("MAX_ALERT_WINDOW_DAYS", str(WINDOW_MAXIMUM))
     monkeypatch.setenv(PASSWORD_ENV, "alex")
+    # An alert can only be drafted on a definition a human has signed, so the
+    # fixture signs the two catalogue entries it owns before any command runs.
+    settings = load_settings()
+    for metric in load_metrics(metrics_path):
+        seed_signature(settings, metric)
 
     def run(capsys, *argv, password=None):
         """Run one command and return its exit code, stdout and stderr."""

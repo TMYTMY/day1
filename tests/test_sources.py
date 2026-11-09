@@ -15,6 +15,7 @@ import pytest
 from openpyxl import Workbook
 
 from src.config import ConfigError
+from src.metrics import load_metrics
 from src.db.sqlite import SqliteAdapter
 from src.models import User
 from src.pipeline import answer_question
@@ -59,6 +60,14 @@ def _declare(
         db_path=database,
     )
     return spec, load_sources(sources_dir), database
+
+
+def _signed_metrics(tmp: Path, settings, seed_signature) -> Path:
+    """The declared source's metric, signed: an unsigned one refuses the question."""
+    path = _metrics(tmp)
+    for metric in load_metrics(path):
+        seed_signature(settings, metric)
+    return path
 
 
 def _metrics(tmp: Path) -> Path:
@@ -142,7 +151,7 @@ def test_a_declared_source_without_a_metric_asks_for_one(env, tmp_path):
     assert "Parcels shipped" in answer.message
 
 
-def test_a_declared_source_with_a_metric_and_role_is_answered(env, tmp_path):
+def test_a_declared_source_with_a_metric_and_role_is_answered(env, tmp_path, seed_signature):
     spec, sources, database = _declare(tmp_path, "parcel_id,amount\np-1,10\n")
     llm = _Scripted(
         ['{"sql": "SELECT parcel_id, amount FROM shipments", "assumptions": "All parcels."}']
@@ -154,7 +163,7 @@ def test_a_declared_source_with_a_metric_and_role_is_answered(env, tmp_path):
         sources,
         database,
         llm=llm,
-        metrics=_metrics(tmp_path),
+        metrics=_signed_metrics(tmp_path, env.settings, seed_signature),
     )
     assert answer.status == "ok"
     assert answer.source == "openrouter"
@@ -177,7 +186,7 @@ def test_another_role_is_denied_with_an_audit_row(env, tmp_path):
     assert env.adapter.row_count("revenue") > 0
 
 
-def test_csv_injection_stays_data_and_cannot_write(env, tmp_path):
+def test_csv_injection_stays_data_and_cannot_write(env, tmp_path, seed_signature):
     body = f"note,amount\n{_DROP},10\n{_CMD},20\n{_INJECT},30\n"
     _spec, sources, database = _declare(tmp_path, body)
     stored = _rows(database, "shipments")
@@ -194,7 +203,7 @@ def test_csv_injection_stays_data_and_cannot_write(env, tmp_path):
         sources,
         database,
         llm=select,
-        metrics=_metrics(tmp_path),
+        metrics=_signed_metrics(tmp_path, env.settings, seed_signature),
     )
     system = select.seen[0][0]["content"]
     assert shown.status == "ok"
@@ -214,7 +223,7 @@ def test_csv_injection_stays_data_and_cannot_write(env, tmp_path):
         sources,
         database,
         llm=blocked,
-        metrics=_metrics(tmp_path),
+        metrics=_signed_metrics(tmp_path, env.settings, seed_signature),
     )
     assert denied.status == "blocked"
     assert denied.rows == []
@@ -222,7 +231,7 @@ def test_csv_injection_stays_data_and_cannot_write(env, tmp_path):
     assert [row["note"] for row in _rows(database, "shipments")] == [_DROP, _CMD, _INJECT]
 
 
-def test_a_declared_source_without_an_llm_key_is_an_explicit_error(env, tmp_path, monkeypatch):
+def test_a_declared_source_without_an_llm_key_is_an_explicit_error(env, tmp_path, monkeypatch, seed_signature):
     calls = {"n": 0}
 
     def _plan(*_args, **_kwargs):
@@ -238,7 +247,7 @@ def test_a_declared_source_without_an_llm_key_is_an_explicit_error(env, tmp_path
         sources,
         database,
         llm=_Off(),
-        metrics=_metrics(tmp_path),
+        metrics=_signed_metrics(tmp_path, env.settings, seed_signature),
     )
     assert calls["n"] == 0
     assert answer.status == "error"
@@ -389,9 +398,9 @@ def test_csv_and_xlsx_declare_the_same_columns(tmp_path):
     assert csv_spec.columns == xlsx_spec.columns == ("parcel_id", "amount")
 
 
-def test_replacing_a_source_misses_the_cached_answer(env, tmp_path):
+def test_replacing_a_source_misses_the_cached_answer(env, tmp_path, seed_signature):
     spec, sources, database = _declare(tmp_path, "parcel_id,amount\np-1,10\n")
-    metrics = _metrics(tmp_path)
+    metrics = _signed_metrics(tmp_path, env.settings, seed_signature)
     llm = _Scripted(
         [
             '{"sql": "SELECT amount FROM shipments /* gen1 */", "assumptions": "first file"}',

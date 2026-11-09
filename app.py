@@ -27,7 +27,14 @@ from src.export import ExportMeta, result_filename, stamp_now, to_csv, to_html
 from src.knowledge.page import render_knowledge_page
 from src.knowledge.store import KnowledgeStore
 from src.llm import LlmClient
-from src.metrics import load_metrics
+from src.metric_signatures import (
+    SIGNED,
+    active_signatures,
+    effective_catalogue,
+    status as signature_status,
+)
+from src.metrics import Metric, match_metrics
+from src.metrics_page import render_metrics_page
 from src.models import Answer, User
 from src.pipeline import answer_question
 from src.present import column_label, format_value, is_money, looks_like_time
@@ -189,9 +196,23 @@ def _session_user() -> User | None:
     )
 
 
-def _suggestions_for(tables: tuple[str, ...]) -> list[str]:
+def _suggestions_for(tables: tuple[str, ...], catalogue: list[Metric]) -> list[str]:
+    """Chips whose question lands on a metric a human has signed.
+
+    ``catalogue`` is the signed metrics only. Offering a chip whose metric is
+    a draft would greet a first-time user with a refusal, so a label is
+    offered only when it resolves to exactly one of those metrics on its own
+    table.
+    """
     allowed = set(tables)
-    return [label for table, label in SUGGESTIONS if table in allowed][:4]
+    offered: list[str] = []
+    for table, label in SUGGESTIONS:
+        if table not in allowed:
+            continue
+        matched = match_metrics(label, catalogue)
+        if len(matched) == 1 and matched[0].table == table:
+            offered.append(label)
+    return offered[:4]
 
 
 def _source_link() -> None:
@@ -510,13 +531,22 @@ def _page_choice() -> str:
         "knowledge": "知識庫",
         "connections": "資料庫連線",
         "sources": "Data sources",
+        "metrics": "口徑目錄",
         "mail": "Mail settings",
         "alerts": "Alerts",
     }
     with st.sidebar:
         return st.radio(
             "Navigate",
-            options=["ask", "knowledge", "connections", "sources", "mail", "alerts"],
+            options=[
+                "ask",
+                "knowledge",
+                "connections",
+                "sources",
+                "metrics",
+                "mail",
+                "alerts",
+            ],
             format_func=lambda value: labels[value],
             key="nav_page",
         )
@@ -615,7 +645,12 @@ def _source_rows(
     return rows
 
 
-def _render_sources_page(user: User, settings: Settings, sources: dict[str, SourceSpec]) -> None:
+def _render_sources_page(
+    user: User,
+    settings: Settings,
+    sources: dict[str, SourceSpec],
+    catalogue: list[Metric],
+) -> None:
     with st.sidebar:
         st.markdown('<p class="d1-kicker">Signed in</p>', unsafe_allow_html=True)
         st.subheader(user.username)
@@ -640,11 +675,6 @@ def _render_sources_page(user: User, settings: Settings, sources: dict[str, Sour
         help="The file stays in quarantine until someone runs the declaration command.",
     )
     staged_now = _consume_staged_uploads(uploads or [], user, settings)
-    try:
-        catalogue = load_metrics(settings.metrics_path)
-    except ConfigError as exc:
-        st.error(str(exc))
-        catalogue = []
     rows = _source_rows(
         visible,
         catalogue,
@@ -729,6 +759,8 @@ def main() -> None:
             settings.openrouter_model,
         )
         knowledge = KnowledgeStore(settings)
+        # The one door to the catalogue: the file overlaid by signatures.
+        catalogue = effective_catalogue(settings)
     except (ConfigError, OSError) as exc:
         st.title("Day 1")
         st.error(str(exc))
@@ -764,7 +796,10 @@ def main() -> None:
         render_knowledge_page(knowledge, settings, user, audit)
         return
     if page == "sources":
-        _render_sources_page(user, settings, sources)
+        _render_sources_page(user, settings, sources, catalogue)
+        return
+    if page == "metrics":
+        render_metrics_page(user, settings, audit, catalogue)
         return
     if page == "mail":
         render_mail_page(user, settings, audit)
@@ -786,8 +821,19 @@ def main() -> None:
     for message in st.session_state.messages:
         _render_message(message)
     if not st.session_state.messages:
-        st.markdown("**Try a question**")
-        for index, label in enumerate(_suggestions_for(user.allowed_tables)):
+        signatures = active_signatures(settings.audit_path)
+        signed = [
+            metric for metric in catalogue if signature_status(metric, signatures) == SIGNED
+        ]
+        chips = _suggestions_for(user.allowed_tables, signed)
+        if chips:
+            st.markdown("**Try a question**")
+        else:
+            st.caption(
+                "No metric definition has been signed yet. An admin signs one on "
+                "口徑目錄 before a question can be answered."
+            )
+        for index, label in enumerate(chips):
             st.button(
                 label,
                 key=f"suggest_{index}",

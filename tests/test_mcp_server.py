@@ -253,6 +253,20 @@ def test_08_a_failed_audit_write_is_an_error_with_no_data(tmp_path, monkeypatch)
     assert "identity" not in payload
     assert _rows(settings.audit_path) == []
 
+    # health writes its row itself because it reads the audit summary after it.
+    # The other two go through _finish, a second call site for the same rule:
+    # neither may return data when its row could not be written.
+    for tool, arguments in (
+        ("check_sql", {"sql": "SELECT product, SUM(revenue_usd) FROM revenue GROUP BY product"}),
+        ("list_allowed_tables", {}),
+    ):
+        payload = _call(server, tool, arguments)
+        assert payload["status"] == "error", tool
+        assert payload["message"] == "the call was not recorded, so it is not reported as done", tool
+        assert "allowed" not in payload, tool
+        assert "tables" not in payload, tool
+    assert _rows(settings.audit_path) == []
+
 
 def test_09_the_suite_still_collects_at_least_the_baseline():
     completed = subprocess.run(

@@ -20,8 +20,13 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from src.models import User
+
+if TYPE_CHECKING:  # pragma: no cover - typing only, never imported at runtime
+    from src.audit import AuditLog
+
 
 # The capability that answers a question. Add a name here only when the code
 # that runs it also ships, so a typo in users.yaml is refused at load time.
@@ -121,3 +126,41 @@ def authorize(
         )
 
     return Decision(allowed=True, capability=capability)
+
+
+def require_admin(user: User, audit: AuditLog) -> bool:
+    """Gate an admin page: refuse the role, say why, and audit the refusal.
+
+    One implementation for every page that changes what the instance means
+    (mail settings, alerts, the metric catalogue). It lives here rather than in
+    each page so a second page cannot grow a slightly different gate.
+
+    Streamlit and the audit log are imported here, not at module scope: this
+    module is also imported by command-line callers that draw no page.
+    """
+    import sqlite3
+
+    import streamlit as st
+
+    decision = authorize(user, ADMIN)
+    if decision.allowed:
+        return True
+    message = decision.message or (
+        f"The {ADMIN} capability is not granted to the {user.role} role."
+    )
+    st.error(message)
+    # A refused page is still a refusal somebody made: it writes one row. A
+    # usage log that cannot be written costs the note, never the refusal.
+    try:
+        audit.record_event(
+            username=user.username,
+            role=user.role,
+            status="denied",
+            event_type="settings_refused",
+            capability=ADMIN,
+            question="settings page refused",
+            error=message,
+        )
+    except sqlite3.Error:
+        pass
+    return False

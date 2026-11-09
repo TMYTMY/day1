@@ -208,9 +208,18 @@ def match_metrics(
     return matched
 
 
+def hash_definition_text(text: str) -> str:
+    """First 12 hex characters of the sha256 of a definition's text.
+
+    The one hash a signature binds to. A signed definition is stored as text,
+    so the hash is taken of the text a person signed, not of the dataclass.
+    """
+    return hashlib.sha256((text or "").encode("utf-8")).hexdigest()[:12]
+
+
 def definition_hash(metric: Metric) -> str:
     """First 12 hex characters of the sha256 of the definition text."""
-    return hashlib.sha256(metric.definition.encode("utf-8")).hexdigest()[:12]
+    return hash_definition_text(metric.definition)
 
 
 # The convention the catalogue has carried since it was written: an entry no

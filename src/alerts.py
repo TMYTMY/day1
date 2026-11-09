@@ -34,6 +34,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -57,7 +58,14 @@ from src.capabilities import (
     authorize,
 )
 from src.config import Settings
-from src.metrics import Metric, definition_hash, is_placeholder, load_metrics, measure_column
+from src.metrics import Metric, definition_hash, measure_column
+from src.metric_signatures import (
+    DRAFT as METRIC_DRAFT,
+    SignedDefinition,
+    active_signatures,
+    effective_catalogue,
+    status as signature_status,
+)
 from src.models import User
 from src.routing import Catalog
 
@@ -411,6 +419,7 @@ class AlertService:
         metrics: list[Metric],
         users_path: Path,
         max_window_days: int,
+        signatures: Mapping[str, SignedDefinition] | None = None,
     ):
         self.store = store
         self.audit = audit
@@ -418,6 +427,10 @@ class AlertService:
         self.metrics = list(metrics)
         self.users_path = Path(users_path)
         self.max_window_days = int(max_window_days)
+        # Which definitions a human has signed. An empty map is the truth for
+        # an instance nobody has signed anything on, and it refuses every
+        # metric, so the default is deliberately "nothing is confirmed".
+        self.signatures = dict(signatures or {})
         self._titles = _table_titles(catalog)
 
     @classmethod
@@ -434,9 +447,10 @@ class AlertService:
             store=AlertStore(settings.alerts_path),
             audit=audit,
             catalog=catalog,
-            metrics=load_metrics(settings.metrics_path) if metrics is None else list(metrics),
+            metrics=effective_catalogue(settings) if metrics is None else list(metrics),
             users_path=settings.users_path,
             max_window_days=settings.max_alert_window_days,
+            signatures=active_signatures(settings.audit_path),
         )
 
     # -- reads ------------------------------------------------------------
@@ -824,13 +838,16 @@ class AlertService:
     def _check_metric(self, metric: Metric) -> AlertResult | None:
         """A metric an alert cannot resolve has no authority as an alert.
 
-        Two markers disqualify a metric, and the placeholder test runs first so
-        an unconfirmed metric keeps the refusal it has always had. A metric
-        with no measure is refused for its own reason: an alert compares a
-        number, so a metric that names no column to sum would be a definition
-        that can only fail at fire time.
+        Two markers disqualify a metric, and the confirmed-definition test runs
+        first so an unconfirmed metric keeps the refusal it has always had.
+        The test is the signature, not the file's wording: ``status`` is the
+        one authority for "is this confirmed", and the message keeps the word
+        placeholder because an unsigned definition is exactly what it has
+        always described. A metric with no measure is refused for its own
+        reason: an alert compares a number, so a metric that names no column
+        to sum would be a definition that can only fail at fire time.
         """
-        if is_placeholder(metric):
+        if signature_status(metric, self.signatures) == METRIC_DRAFT:
             return AlertResult(
                 ok=False,
                 message=(

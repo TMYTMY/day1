@@ -18,7 +18,19 @@ from src.grain import grain_warning
 from src.knowledge.store import KnowledgeStore
 from src.llm import LlmClient, LlmError, parse_model_output
 from src.local_sql import PlannerError, plan_sql
-from src.metrics import Metric, active_metrics, definition_hash, load_metrics, match_metrics, metric_cache_key
+from src.metrics import (
+    Metric,
+    active_metrics,
+    definition_hash,
+    match_metrics,
+    metric_cache_key,
+)
+from src.metric_signatures import (
+    DRAFT,
+    active_signatures,
+    effective_catalogue,
+    status as signature_status,
+)
 from src.models import Answer, TableSchema, User
 from src.present import local_summary
 from src.prompt import PROMPT_VERSION, build_messages, build_summary_messages
@@ -441,7 +453,7 @@ def answer_question(
         return finish(Answer(status="clarify", message=message, tables=permitted))
 
     table = permitted[0]
-    catalogue = load_metrics(settings.metrics_path)
+    catalogue = effective_catalogue(settings)
     declared = spec_for_table(sources or {}, table)
     if declared is not None and _source_shadows_warehouse(catalog, adapter, declared):
         declared = None
@@ -459,11 +471,6 @@ def answer_question(
             statement_timeout_ms=settings.sql_timeout_ms,
         )
         active = resolved.adapter
-    else:
-        # The demo warehouse is re-seeded on a moving date window, so the newest
-        # date the rows cover belongs in the cache key (a declared source is
-        # already bound by source_id + sha256).
-        data_window = _data_window(active, table)
     matched = [metric for metric in match_metrics(text, catalogue) if metric.table == table]
     if len(matched) != 1:
         role_titles = [metric.title for metric in active_metrics(catalogue) if metric.table in allowed]
@@ -482,6 +489,27 @@ def answer_question(
             )
         return finish(Answer(status="clarify", message=message, tables=[table]))
     selected = matched[0]
+    # A number is only issued against a definition a human signed. This runs
+    # after the permission gate — the role has already been checked — and
+    # before any SQL exists: nothing is generated, no model is called, and the
+    # refusal is audited with the hash of the draft that was refused.
+    if signature_status(selected, active_signatures(settings.audit_path)) == DRAFT:
+        return finish(
+            Answer(
+                status="clarify",
+                message=(
+                    f"This number has no confirmed definition. Owner: {selected.owner}. "
+                    "A user with the admin capability can confirm it on the 口徑目錄 "
+                    "(Metric catalogue) page. Nothing was queried."
+                ),
+                tables=[table],
+            )
+        )
+    if declared is None:
+        # The demo warehouse is re-seeded on a moving date window, so the newest
+        # date the rows cover belongs in the cache key (a declared source is
+        # already bound by source_id + sha256).
+        data_window = _data_window(active, table)
     definition_digest = definition_hash(selected)
     try:
         cached_payload = audit.cached_answer(

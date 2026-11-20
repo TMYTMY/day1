@@ -233,6 +233,53 @@ The flags are the point: every label ships `reviewed: false`, and the harness pr
 
 `python scripts/eval_ablation.py` shows the other half: with the same question asked twice, the only difference in the model request is the notes block, and the audit row for each carries its own `knowledge_snippets`. That path runs a scripted reply and labels itself `WIRING ONLY` — identical SQL there proves nothing about model behaviour. `--live` runs the same comparison against the configured model and refuses without a key.
 
+## MCP server (v0)
+
+`src/mcp_server.py` exposes three tools to an MCP client: `health`, `list_allowed_tables`, and `check_sql`. It proves four things and nothing else: a client lists the tools, a call returns plain structured data, every call appends exactly one row to the local audit log, and a forbidden SQL string is refused **and recorded**. It does not answer questions, plan SQL, or execute anything: `check_sql` validates a string through the same allowlist the app uses (`src/sql_guard.py`) and stops.
+
+The identity is fixed by the process, never by a tool argument. `MCP_USER` names an account in `config/users.yaml`, and its role and table grants are read with `src.auth.user_named`, the loader the app uses. No tool has a `role`, `user`, or `allowed_tables` parameter, because a client that can name its own role is not gated. If the user is unknown, or its role lacks the `query` capability, the server exits non-zero with one line on stderr instead of serving an identity it cannot read — `MCP_USER=owner` therefore refuses, because admin is a real grant but not a grant to read tables.
+
+Two variables decide who the server is and where the proof lands:
+
+| Variable | Purpose |
+| --- | --- |
+| `MCP_USER` | The account this process acts as. Default `analyst`. It must exist in `config/users.yaml` and hold the `query` capability, or the server refuses to start. |
+| `AUDIT_PATH` | Where the one-row-per-call proof lands. Default `data/audit.db`, the same log the app writes. |
+
+`DB_PATH`, `USERS_PATH`, and the rest come from the usual environment below.
+
+Run it over stdio:
+
+```bash
+pip install -r requirements-mcp.txt
+MCP_USER=analyst DB_PATH=data/demo.db AUDIT_PATH=data/audit.db python -m src.mcp_server
+```
+
+The SDK is optional and lives in `requirements-mcp.txt`; `requirements.txt` is unchanged, so the Streamlit app does not gain a dependency from this front end.
+
+Cursor entry (`~/.cursor/mcp.json`, or `.cursor/mcp.json` in the project):
+
+```json
+{
+  "mcpServers": {
+    "day1": {
+      "command": "/absolute/path/to/venv/bin/python",
+      "args": ["-m", "src.mcp_server"],
+      "cwd": "/absolute/path/to/day1",
+      "env": {
+        "MCP_USER": "analyst",
+        "DB_PATH": "/absolute/path/to/day1/data/demo.db",
+        "AUDIT_PATH": "/absolute/path/to/day1/data/audit.db"
+      }
+    }
+  }
+}
+```
+
+`cwd` matters: the server imports `src.*`, so it must start in the repository root. Hermes and Grok Bot are unproven — this repository documents and tests the Cursor stdio entry only. Remote or HTTP transport, per-request identity, and answering questions are out of scope for v0.
+
+The audit row is the evidence, not the client's "connected" badge: `event_type="mcp_tool_call"`, `capability="mcp"`, one row per call, written **before** the result is returned. A refused `check_sql` is recorded as `denied` with the guard's own reason in `error`. If the row cannot be written, the call returns an error and no data, because a success whose audit line is missing is the failure this product exists to prevent.
+
 ## Environment
 
 | Variable | Purpose |

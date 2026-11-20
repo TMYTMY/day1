@@ -303,6 +303,30 @@ Results wider than the preview are truncated on screen. CSV and HTML download th
 
 Each question is appended to the audit database with the user, role, capability, event type, tables, SQL, status, and row count. One writer on the audit store (`AuditLog.record_event`) builds the row, so every outcome — ok, clarify, denied, blocked, failed — writes exactly one row, and a capability that lands later writes the same shape.
 
+## Metric catalogue: who signed the definition
+
+`config/metrics.yaml` is the draft. A metric answers a question only after a person
+with the `admin` capability signs its text on **口徑目錄** (Metric catalogue) in the
+sidebar, re-entering the instance operator secret. The signed text lives in
+`metric_signatures`, one row per metric, in the audit database, so the signature and
+the row that records who signed it are one transaction. A signature stores the hash
+of the text it signed.
+
+Three consequences worth knowing before the demo:
+
+- An unsigned metric refuses the question with a `clarify` answer that names its
+  owner and points at this page. No SQL is generated and no model is called.
+- Editing the file does not change what answers. The signature is in force until
+  someone signs the edit; the page shows both texts and says the file edit is not
+  in force.
+- Every metric on the shipped catalogue starts as a draft. `revenue_by_product`
+  already carries a real sentence, so signing it is one click; the three
+  `PLACEHOLDER` entries need a business owner's words before anyone can sign them.
+  Sign one on this page, then ask again — the same question answers.
+
+The alert path asks the same question (`status(...) == "draft"`), so an unsigned
+metric cannot carry an alert definition either.
+
 ## Alerts: setting up the mail connection
 
 One command per instance, once:

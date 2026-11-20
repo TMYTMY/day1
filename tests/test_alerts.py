@@ -27,6 +27,7 @@ from src.auth import authenticate
 from src.capabilities import ALERT, QUERY
 from src.config import ROOT, ConfigError, load_settings
 from src.metrics import is_placeholder, load_metrics
+from src.metric_signatures import effective_catalogue
 
 CATALOGUE = ROOT / "config" / "metrics.yaml"
 USERS = ROOT / "config" / "users.yaml"
@@ -122,7 +123,7 @@ def _write_users(tmp_path):
 
 
 @pytest.fixture
-def instance(env, tmp_path):
+def instance(env, tmp_path, seed_signature):
     """One instance with its own alert database, catalogue and user directory."""
     metrics_path = _write_metrics(tmp_path, _TEMP_METRICS)
     users_path = _write_users(tmp_path)
@@ -132,13 +133,18 @@ def instance(env, tmp_path):
         metrics_path=metrics_path,
         users_path=users_path,
     )
+    # These metrics are definitions a human owns, so the fixture signs them:
+    # the alert path refuses a metric nobody has confirmed, which is now the
+    # same rule the answer path uses.
+    for metric in load_metrics(metrics_path):
+        seed_signature(settings, metric)
     service = AlertService.from_settings(settings, audit=env.audit, catalog=env.catalog)
     return SimpleNamespace(
         settings=settings,
         service=service,
         audit=env.audit,
         users_path=users_path,
-        metrics=load_metrics(metrics_path),
+        metrics=effective_catalogue(settings),
         catalog=env.catalog,
         alex=authenticate("alex", "alex", users_path),
         rita=authenticate("rita", "rita", users_path),
@@ -465,6 +471,7 @@ def test_a_window_is_refused_rather_than_clamped(instance):
         metrics=instance.metrics,
         users_path=instance.users_path,
         max_window_days=30,
+        signatures=instance.service.signatures,
     )
     refused = _draft(short, instance.alex, window_days=31)
     assert refused.ok is False

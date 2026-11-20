@@ -53,6 +53,19 @@ def _ask(env, user, question, llm=None, knowledge=None):
     )
 
 
+DAU_DEFINITION = "Distinct users with at least one session on that day, per platform."
+
+
+def _sign_metric(seed_signature, settings, metric_id, definition=None):
+    """Put one catalogue entry in force, optionally with text the test wrote."""
+    path = settings.metrics_path
+    metric = next(item for item in load_metrics(path) if item.id == metric_id)
+    if definition is not None:
+        metric = replace(metric, definition=definition)
+    seed_signature(settings, metric)
+    return metric
+
+
 def test_revenue_question_uses_the_revenue_table(env):
     answer = _ask(env, env.analyst, "What was total revenue by product over the last 90 days?")
     assert answer.status == "ok"
@@ -65,7 +78,9 @@ def test_revenue_question_uses_the_revenue_table(env):
     assert check_sql(answer.sql, {"revenue"}).ok
 
 
-def test_dau_question_uses_the_dau_table(env):
+def test_dau_question_uses_the_dau_table(env, seed_signature):
+    # A number is only answered against a definition a human has signed.
+    _sign_metric(seed_signature, env.settings, "dau_by_platform", DAU_DEFINITION)
     answer = _ask(env, env.analyst, "Show daily active users by platform for the last 30 days")
     assert answer.status == "ok"
     assert answer.tables == ["dau"]
@@ -75,7 +90,8 @@ def test_dau_question_uses_the_dau_table(env):
     assert {row["platform"] for row in answer.rows} == {"ios", "android", "web"}
 
 
-def test_cantonese_questions_hit_the_right_tables(env):
+def test_cantonese_questions_hit_the_right_tables(env, seed_signature):
+    _sign_metric(seed_signature, env.settings, "dau_by_platform", DAU_DEFINITION)
     revenue = _ask(env, env.analyst, "過去 90 日各產品收入")
     dau = _ask(env, env.growth, "最近 30 日各平台日活")
     assert revenue.status == "ok" and revenue.tables == ["revenue"]
@@ -335,7 +351,14 @@ def _audit_rows(path):
     return rows
 
 
-def test_a_definition_change_misses_the_answer_cache(env, tmp_path):
+def test_a_definition_change_misses_the_answer_cache(env, tmp_path, seed_signature):
+    """Editing the file changes nothing; signing the edit changes the answer.
+
+    The file is the draft and the signature is what is in force, so a file edit
+    alone must serve the cached answer for the signed text. A new signature is
+    a different definition, and a different definition must not reuse SQL
+    generated for the old one.
+    """
     source = (ROOT / "config" / "metrics.yaml").read_text(encoding="utf-8")
     path = tmp_path / "metrics.yaml"
     path.write_text(source, encoding="utf-8")
@@ -368,9 +391,28 @@ def test_a_definition_change_misses_the_answer_cache(env, tmp_path):
     )
     assert updated != source
     path.write_text(updated, encoding="utf-8")
-    v2 = definition_hash(next(item for item in load_metrics(path) if item.id == "revenue_by_product"))
+    edited = next(item for item in load_metrics(path) if item.id == "revenue_by_product")
+    assert edited.definition == confirmed
+    v2 = definition_hash(edited)
     assert v1 != v2
 
+    # The edit is not in force yet: the signed text still answers, and its
+    # answer is the one already cached.
+    still_signed = answer_question(
+        question,
+        env.analyst,
+        settings=settings,
+        adapter=env.adapter,
+        catalog=env.catalog,
+        audit=env.audit,
+        llm=llm,
+    )
+    assert still_signed.status == "ok"
+    assert still_signed.sql is not None and "gen1" in still_signed.sql
+    assert len(llm.seen) == 1
+
+    # Signing the file's version puts the new definition in force.
+    seed_signature(settings, edited)
     second = answer_question(
         question,
         env.analyst,
@@ -385,12 +427,12 @@ def test_a_definition_change_misses_the_answer_cache(env, tmp_path):
     assert "gen1" not in second.sql
     assert len(llm.seen) == 2
     rows = _audit_rows(env.audit.path)
-    assert len(rows) == 2
+    assert len(rows) == 3
     assert rows[0]["sql"] is not None and "gen1" in rows[0]["sql"]
-    assert rows[0]["definition_hash"] == v1
-    assert rows[1]["sql"] is not None and "gen2" in rows[1]["sql"]
-    assert rows[1]["definition_hash"] == v2
-    assert rows[1]["metric_id"] == "revenue_by_product"
+    assert rows[0]["definition_hash"] == rows[1]["definition_hash"] == v1
+    assert rows[2]["sql"] is not None and "gen2" in rows[2]["sql"]
+    assert rows[2]["definition_hash"] == v2
+    assert rows[2]["metric_id"] == "revenue_by_product"
 
 
 def test_a_cached_answer_for_another_metric_is_not_reused(env):

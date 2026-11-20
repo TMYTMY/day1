@@ -51,7 +51,7 @@ from src.alerts import (
 )
 from src.audit import AuditLog
 from src.auth import user_named
-from src.capabilities import ADMIN, QUERY, authorize
+from src.capabilities import ADMIN, QUERY, authorize, require_admin
 from src.config import Settings, redact
 from src.crypto import SecretKeyError
 from src.fires import FireStore
@@ -165,26 +165,6 @@ def _record(
         return True
     except sqlite3.Error:
         return False
-
-
-def _require_admin(user: User, audit: AuditLog) -> bool:
-    """Refuse the page when the role has no admin grant, and audit that refusal."""
-    decision = authorize(user, ADMIN)
-    if decision.allowed:
-        return True
-    message = decision.message or (
-        f"The {ADMIN} capability is not granted to the {user.role} role."
-    )
-    st.error(message)
-    _record(
-        audit,
-        user,
-        "settings_refused",
-        status="denied",
-        question="settings page refused",
-        error=message,
-    )
-    return False
 
 
 def _provider_name(snapshot: ResolvedMail) -> str:
@@ -663,7 +643,7 @@ def render_mail_page(user: User, settings: Settings, audit: AuditLog) -> None:
     st.markdown('<p class="d1-kicker">Settings</p>', unsafe_allow_html=True)
     st.title("Mail settings")
     st.warning(DEMO_AUTH_WARNING)
-    if not _require_admin(user, audit):
+    if not require_admin(user, audit):
         return
 
     store = MailSettingsStore(settings.settings_path)
@@ -1029,7 +1009,7 @@ def render_alerts_page(
     st.markdown('<p class="d1-kicker">Settings</p>', unsafe_allow_html=True)
     st.title("Alerts")
     st.warning(DEMO_AUTH_WARNING)
-    if not _require_admin(user, audit):
+    if not require_admin(user, audit):
         return
 
     service = AlertService.from_settings(settings, audit=audit, catalog=catalog)

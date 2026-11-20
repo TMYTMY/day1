@@ -26,6 +26,9 @@ from src.db.seed import rebuild
 from src.db.sqlite import SqliteAdapter
 from src.knowledge.store import KnowledgeStore
 from src.llm import LlmClient
+from src.metric_signatures import sign
+from src.metrics import load_metrics
+from src.models import User
 from src.pipeline import answer_question
 from src.routing import load_catalog
 
@@ -116,8 +119,14 @@ def _passes(root: Path, llm) -> dict:
     db_path = root / "demo.db"
     rebuild(db_path)
     base = _settings(root)
-    noted_settings = replace(base, knowledge_path=root / "noted")
-    empty_settings = replace(base, knowledge_path=root / "empty")
+    # One instance log per pass: the audit log is also where signed definitions
+    # live, so each pass signs the metric in its own database.
+    noted_settings = replace(
+        base, knowledge_path=root / "noted", audit_path=root / "audit-noted.db"
+    )
+    empty_settings = replace(
+        base, knowledge_path=root / "empty", audit_path=root / "audit-empty.db"
+    )
     noted_store = KnowledgeStore(noted_settings)
     noted_store.add_document(
         "glossary.md",
@@ -130,12 +139,31 @@ def _passes(root: Path, llm) -> dict:
     user = authenticate("finance", "finance", base.users_path)
     catalog = load_catalog(base.routing_path)
     adapter = SqliteAdapter(db_path)
-    noted_audit = AuditLog(root / "audit-noted.db")
-    empty_audit = AuditLog(root / "audit-empty.db")
+    noted_audit = AuditLog(noted_settings.audit_path)
+    empty_audit = AuditLog(empty_settings.audit_path)
+    # A number is only issued against a definition a human signed, and this
+    # script asks a question: sign the metric it is about in both instance
+    # logs, so the only difference between the passes stays the notes.
+    metric = next(
+        item for item in load_metrics(base.metrics_path) if item.id == "revenue_by_product"
+    )
+    operator = User(
+        username="owner", role="owner", allowed_tables=(), capabilities=("admin",)
+    )
+    for log in (noted_audit, empty_audit):
+        sign(
+            audit=log,
+            metric=metric,
+            definition=metric.definition,
+            owner=metric.owner,
+            exceptions=metric.exceptions,
+            effective_from=metric.effective_from,
+            signer=operator,
+        )
     noted = answer_question(
         QUESTION,
         user,
-        settings=base,
+        settings=noted_settings,
         adapter=adapter,
         catalog=catalog,
         audit=noted_audit,
@@ -145,7 +173,7 @@ def _passes(root: Path, llm) -> dict:
     empty = answer_question(
         QUESTION,
         user,
-        settings=base,
+        settings=empty_settings,
         adapter=adapter,
         catalog=catalog,
         audit=empty_audit,

@@ -4,8 +4,30 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from src.config import ROOT
+from dataclasses import replace
+
+from src.config import ROOT, load_settings
+from src.metrics import load_metrics
 from streamlit.testing.v1 import AppTest
+
+
+DAU_DEFINITION = "Distinct users with at least one session that day, per platform."
+
+
+def _seed_signed(seed_signature, *metric_ids: str, definition: str | None = None) -> None:
+    """Put catalogue entries in force before the app starts.
+
+    A number is only answered against a definition a human signed, and this
+    instance has no operator visit in it, so the test makes that visit first.
+    """
+    settings = load_settings()
+    for metric_id in metric_ids:
+        metric = next(
+            item for item in load_metrics(settings.metrics_path) if item.id == metric_id
+        )
+        if definition is not None:
+            metric = replace(metric, definition=definition)
+        seed_signature(settings, metric)
 
 
 def _blob(at: AppTest) -> str:
@@ -27,13 +49,15 @@ def _sign_in(at: AppTest, username: str, password: str) -> AppTest:
     return at
 
 
-def test_analyst_can_ask_export_and_get_a_clarifying_question(monkeypatch, tmp_path):
+def test_analyst_can_ask_export_and_get_a_clarifying_question(monkeypatch, tmp_path, seed_signature):
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     monkeypatch.setenv("DB_PATH", str(tmp_path / "demo.db"))
     monkeypatch.setenv("AUDIT_PATH", str(tmp_path / "audit.db"))
     monkeypatch.setenv("DB_BACKEND", "sqlite")
     monkeypatch.setenv("KNOWLEDGE_PATH", str(tmp_path / "knowledge"))
     monkeypatch.setenv("EMBEDDING_PROVIDER", "local")
+    _seed_signed(seed_signature, "revenue_by_product")
+    _seed_signed(seed_signature, "dau_by_platform", definition=DAU_DEFINITION)
 
     at = AppTest.from_file(str(ROOT / "app.py"), default_timeout=60).run(timeout=60)
     assert at.button(key="login_submit") is not None
@@ -63,13 +87,14 @@ def test_analyst_can_ask_export_and_get_a_clarifying_question(monkeypatch, tmp_p
     assert "FROM dau" in "\n".join(element.value for element in at.code)
 
 
-def test_knowledge_base_page_indexes_and_deletes_a_glossary(monkeypatch, tmp_path):
+def test_knowledge_base_page_indexes_and_deletes_a_glossary(monkeypatch, tmp_path, seed_signature):
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     monkeypatch.setenv("DB_PATH", str(tmp_path / "demo.db"))
     monkeypatch.setenv("AUDIT_PATH", str(tmp_path / "audit.db"))
     monkeypatch.setenv("DB_BACKEND", "sqlite")
     monkeypatch.setenv("KNOWLEDGE_PATH", str(tmp_path / "knowledge"))
     monkeypatch.setenv("EMBEDDING_PROVIDER", "local")
+    _seed_signed(seed_signature, "revenue_by_product")
 
     at = AppTest.from_file(str(ROOT / "app.py"), default_timeout=60).run(timeout=60)
     at = _sign_in(at, "analyst", "analyst")
@@ -223,13 +248,14 @@ def test_a_failed_answer_shows_a_fixed_message_and_not_the_exception(monkeypatch
     assert "The question could not be answered. The server log has the details." in page
 
 
-def test_a_channel_split_shows_a_grain_warning_and_the_rows(monkeypatch, tmp_path):
+def test_a_channel_split_shows_a_grain_warning_and_the_rows(monkeypatch, tmp_path, seed_signature):
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     monkeypatch.setenv("DB_PATH", str(tmp_path / "demo.db"))
     monkeypatch.setenv("AUDIT_PATH", str(tmp_path / "audit.db"))
     monkeypatch.setenv("DB_BACKEND", "sqlite")
     monkeypatch.setenv("KNOWLEDGE_PATH", str(tmp_path / "knowledge"))
     monkeypatch.setenv("EMBEDDING_PROVIDER", "local")
+    _seed_signed(seed_signature, "revenue_by_product")
 
     at = AppTest.from_file(str(ROOT / "app.py"), default_timeout=60).run(timeout=60)
     at = _sign_in(at, "analyst", "analyst")

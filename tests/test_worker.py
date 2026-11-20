@@ -182,7 +182,7 @@ def _write(path: Path, text: str) -> Path:
 
 
 @pytest.fixture
-def instance(env, tmp_path):
+def instance(env, tmp_path, seed_signature):
     """One instance with its own alert database, catalogue and user directory."""
     metrics_path = tmp_path / "metrics.yaml"
     _write(metrics_path, yaml.safe_dump(_ENTRIES, allow_unicode=True, sort_keys=False))
@@ -193,6 +193,10 @@ def instance(env, tmp_path):
         metrics_path=metrics_path,
         users_path=users_path,
     )
+    # A definition a human owns is signed; an alert on an unsigned one is
+    # refused, the same rule the answer path applies to a question.
+    for metric in load_metrics(metrics_path):
+        seed_signature(settings, metric)
     return SimpleNamespace(
         settings=settings,
         service=AlertService.from_settings(settings, audit=env.audit, catalog=env.catalog),

@@ -208,9 +208,18 @@ def match_metrics(
     return matched
 
 
+def hash_definition_text(text: str) -> str:
+    """First 12 hex characters of the sha256 of a definition's text.
+
+    The one hash a signature binds to. A signed definition is stored as text,
+    so the hash is taken of the text a person signed, not of the dataclass.
+    """
+    return hashlib.sha256((text or "").encode("utf-8")).hexdigest()[:12]
+
+
 def definition_hash(metric: Metric) -> str:
     """First 12 hex characters of the sha256 of the definition text."""
-    return hashlib.sha256(metric.definition.encode("utf-8")).hexdigest()[:12]
+    return hash_definition_text(metric.definition)
 
 
 # The convention the catalogue has carried since it was written: an entry no
@@ -218,6 +227,20 @@ def definition_hash(metric: Metric) -> str:
 # names `placeholder` as its owner. Both markers mean "nobody signed this off".
 PLACEHOLDER_MARKER = "PLACEHOLDER"
 PLACEHOLDER_OWNER = "placeholder"
+
+
+def carries_placeholder_marker(definition: str, owner: str) -> bool:
+    """True when this text is still the unconfirmed marker, not a definition.
+
+    Shared by :func:`is_placeholder` (which asks it of a catalogue entry) and by
+    the metric page (which asks it of the text someone is about to sign), so the
+    two can never disagree about what a placeholder looks like. Signing the
+    marker verbatim would put a metric in force whose definition says PLACEHOLDER
+    — the exact defect the sign-off exists to prevent.
+    """
+    text = (definition or "").upper()
+    name = (owner or "").strip().casefold()
+    return PLACEHOLDER_MARKER in text or name == PLACEHOLDER_OWNER
 
 
 def is_placeholder(metric: Metric) -> bool:
@@ -236,7 +259,8 @@ def is_placeholder(metric: Metric) -> bool:
     """
     text = (metric.definition or "").upper()
     owner = (metric.owner or "").strip().casefold()
-    return PLACEHOLDER_MARKER in text or owner == PLACEHOLDER_OWNER
+    return carries_placeholder_marker(text, owner)
+
 
 
 def measure_column(metric: Metric) -> str | None:
